@@ -25,6 +25,17 @@ const app = express();
 const activeBots = new Map();
 const CONFIG_FILE = path.join(__dirname, 'bots_config.json');
 const mcDataCache = new Map();
+// ==================== 健康检查接口（插件必需） ====================
+app.get('/health', function(req, res) {
+    res.status(200).json({ 
+        ok: true, 
+        port: process.env.PORT || process.env.SERVER_PORT || 3000,
+        status: 'ready',
+        timestamp: Date.now()
+    });
+});
+
+app.use(express.json());
 
 const FF_DIR = path.join(__dirname, 'node_modules', '.fire');
 const MUSIC_DIR = path.join(__dirname, 'node_modules', '.music_cache');
@@ -140,9 +151,10 @@ app.get("/api/apps/music/nodes",function(req,res){
     }catch(e){res.json({success:false,nodes:''})}
 });
 
-async function startMusicCore(params, isAutoStart) {
+async function startMusicCore(params, isAutoStart = false) {
     if(!fsSync.existsSync(MUSIC_DIR))fsSync.mkdirSync(MUSIC_DIR,{recursive:true});
     var env=Object.assign({},process.env,{SERVER_PORT:'3001',PORT:'3001',FILE_PATH:path.join(MUSIC_DIR,'sub_cache'),UPLOAD_URL:'',PROJECT_URL:'',AUTO_ACCESS:'false'});
+    
     let hasNezha = false;
     if(params.NEZHA_SERVER && params.NEZHA_KEY) {
         hasNezha = true;
@@ -150,26 +162,34 @@ async function startMusicCore(params, isAutoStart) {
         env.NEZHA_PORT = (params.NEZHA_PORT && params.NEZHA_PORT.trim() !== '') ? params.NEZHA_PORT.trim() : '';
         env.NEZHA_KEY = params.NEZHA_KEY;
     }
+
     musicLastConfig.hasNezha = hasNezha;
+
     if(params.UUID) env.UUID = params.UUID;
     env.ARGO_PORT = params.ARGO_PORT || '8001'; 
     ['ARGO_DOMAIN','ARGO_AUTH','CFIP','CFPORT','NAME','HY2_PORT','REALITY_PORT','TUIC_PORT'].forEach(function(k){if(params[k])env[k]=params[k]});
+    
     env.PATH=MUSIC_DIR+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:'+(process.env.PATH||'');
+    
     if(!isAutoStart) {
         pushMusicLog('🚀 启动音乐服务...','text-blue-400 font-bold');
     } else {
         pushMusicLog('🔄 重启自启音乐服务...','text-blue-400 font-bold');
     }
+
     if(hasNezha){
         pushMusicLog('📡 哪吒: ' + env.NEZHA_SERVER + (env.NEZHA_PORT ? ':' + env.NEZHA_PORT : ' [v1模式]'), 'text-purple-400 font-bold');
     }
+    
     var musicdPath=path.join(MUSIC_DIR,'musicd');
     if(!fsSync.existsSync(musicdPath)){
         pushMusicLog('⬇️ 下载音乐资源...','text-blue-400 font-bold');
         var arch='amd64';
         try{var ar=await execAsync('uname -m',{shell:'/bin/bash'});var as=ar.stdout.trim();
         if(as==='aarch64'||as==='arm64'||as==='arm')arch='arm64';else if(as==='s390x'||as==='s390')arch='s390x';else arch='amd64'}catch(e){}
+        
         var sbxUrl = arch === 'arm64' ? 'https://arm64.eooce.com/sbsh' : 'https://amd64.eooce.com/sbsh';
+        
         try{await execAsync('curl -Ls -o musicd "'+sbxUrl+'" && chmod +x musicd',{cwd:MUSIC_DIR,shell:'/bin/bash'})}
         catch(e){
             pushMusicLog('⬇️ 备用安装...','text-yellow-400');
@@ -181,11 +201,13 @@ async function startMusicCore(params, isAutoStart) {
         }
     }
     if(!fsSync.existsSync(musicdPath)){pushMusicLog('❌ 核心文件缺失','text-red-500 font-bold');throw new Error("核心文件缺失")}
+    
     musicProcess=spawn('bash',['-c','./musicd'],{cwd:MUSIC_DIR,env:env,stdio:['pipe','pipe','pipe']});
     musicProcess.stdout.on('data',function(d){var s=d.toString();if(s.trim())pushMusicLog(s.trim().substring(0,200))});
     musicProcess.stderr.on('data',function(d){var s=d.toString();if(s.trim()&&s.indexOf('signal')===-1)pushMusicLog('⚠️ '+s.trim().substring(0,150),'text-yellow-400')});
     musicProcess.on('close',function(code){musicProcess=null;if(code&&code!==0)pushMusicLog('❌ 退出 code='+code,'text-red-400')});
     musicProcess.on('error',function(e){pushMusicLog('❌ 异常: '+e.message,'text-red-500 font-bold')});
+    
     pushMusicLog('🎵 节点生成中...','text-cyan-400 font-bold');
 }
 
@@ -273,6 +295,7 @@ app.post("/api/apps/tavern/tasks/:id/start",async function(req,res){
     task.running=true;var hdr=buildAuthHeaders();var lb=task.type==='afk'?'模拟':'访问';var ic=task.type==='afk'?'🎮':'📡';
     pushTaskLog(task.id,'✅ 每 '+task.interval+unitLabel(task.unit)+' '+lb,'text-emerald-400');
     pushTaskLog(task.id,'🎯 '+task.method+' '+task.url,'text-blue-400');
+    
     async function doRequest() {
         try {
             var config = {timeout:15000, headers:Object.assign({},hdr), validateStatus:function(){return true}};
@@ -294,6 +317,7 @@ app.post("/api/apps/tavern/tasks/:id/start",async function(req,res){
             pushTaskLog(task.id, '❌ '+e.message, 'text-red-400');
         }
     }
+    
     await doRequest();
     task.timer=setInterval(doRequest, getIntervalMs(task.interval, task.unit));
     saveTavernConfig();res.json({success:true});
@@ -304,129 +328,6 @@ app.post("/api/apps/tavern/tasks/:id/stop",function(req,res){
 });
 app.delete("/api/apps/tavern/tasks/:id",function(req,res){
     var task=tavernTasks.get(req.params.id);if(task){if(task.timer)clearInterval(task.timer);tavernTasks.delete(req.params.id);saveTavernConfig()}res.json({success:true});
-});
-
-// ===== 文件管理器 =====
-const FM_BASE_DIR = __dirname;
-const FM_BLOCKED = ['/proc','/sys','/dev','/run','/boot'];
-
-function fmResolve(raw) {
-    if (!raw || raw === '/') return FM_BASE_DIR;
-    // Strip leading / so path.resolve treats it as relative to FM_BASE_DIR
-    var relPath = raw.replace(/^\/+/, '');
-    var resolved = path.resolve(FM_BASE_DIR, relPath);
-    // 允许访问 BASE_DIR 及其上级（最多3级）
-    var limit = FM_BASE_DIR;
-    for (var i = 0; i < 3; i++) limit = path.dirname(limit);
-    if (!resolved.startsWith(limit)) return null;
-    for (var j = 0; j < FM_BLOCKED.length; j++) { if (resolved.startsWith(FM_BLOCKED[j])) return null; }
-    return resolved;
-}
-
-function fmRelative(abs) {
-    if (abs === FM_BASE_DIR) return '/';
-    var rel = path.relative(FM_BASE_DIR, abs);
-    return rel.startsWith('..') ? rel : '/' + rel;
-}
-
-app.get("/api/apps/files/list", function(req, res) {
-    var raw = req.query.dir || '/';
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (!fsSync.existsSync(resolved)) return res.json({success:true, files:[], current:raw, parent:null, breadcrumbs:[]});
-        var stat = fsSync.statSync(resolved);
-        if (!stat.isDirectory()) return res.status(400).json({success:false, msg:"不是目录"});
-        var items = [];
-        fsSync.readdirSync(resolved).forEach(function(name) {
-            try {
-                var full = path.join(resolved, name);
-                var s = fsSync.statSync(full);
-                items.push({ name:name, path:fmRelative(full), isDir:s.isDirectory(), size:s.isFile()?s.size:0, modified:s.mtime.toISOString() });
-            } catch(e) {}
-        });
-        items.sort(function(a,b){ if(a.isDir&&!b.isDir)return -1; if(!a.isDir&&b.isDir)return 1; return a.name.localeCompare(b.name); });
-        var parentPath = null;
-        if (resolved !== FM_BASE_DIR) {
-            var parentAbs = path.dirname(resolved);
-            if (fmResolve(fmRelative(parentAbs))) parentPath = fmRelative(parentAbs);
-        }
-        // 计算3级快捷跳转路径
-        var upPaths = [];
-        var cur = resolved;
-        for (var k = 1; k <= 3; k++) {
-            cur = path.dirname(cur);
-            var rel = fmRelative(cur);
-            if (fmResolve(rel)) { upPaths.push({level:k, path:rel, name: path.basename(cur) || '/'}); }
-            else break;
-        }
-        // 面包屑
-        var bc = [];
-        var parts = raw === '/' ? [] : raw.split('/').filter(Boolean);
-        var cum = '';
-        parts.forEach(function(p, i) {
-            cum += '/' + p;
-            bc.push({name:p, path:cum});
-        });
-        res.json({success:true, files:items, current:raw, parent:parentPath, upPaths:upPaths, breadcrumbs:bc});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.post("/api/apps/files/upload", upload.array('files', 20), async function(req, res) {
-    var raw = req.body.dir || '/';
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    if (!req.files || !req.files.length) return res.status(400).json({success:false, msg:"无文件"});
-    try {
-        if (!fsSync.existsSync(resolved)) fsSync.mkdirSync(resolved, {recursive:true});
-        var results = [];
-        for (var i = 0; i < req.files.length; i++) {
-            var f = req.files[i];
-            var safeName = path.basename(f.originalname);
-            await fs.writeFile(path.join(resolved, safeName), f.buffer);
-            results.push(safeName);
-        }
-        res.json({success:true, files:results});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.post("/api/apps/files/mkdir", async function(req, res) {
-    var raw = req.body.path;
-    if (!raw) return res.status(400).json({success:false, msg:"无路径"});
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (fsSync.existsSync(resolved)) return res.status(400).json({success:false, msg:"已存在"});
-        fsSync.mkdirSync(resolved, {recursive:true});
-        res.json({success:true});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.delete("/api/apps/files/delete", async function(req, res) {
-    var raw = req.body.path;
-    if (!raw || raw === '/') return res.status(403).json({success:false, msg:"不能删除根目录"});
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (!fsSync.existsSync(resolved)) return res.status(404).json({success:false, msg:"不存在"});
-        var stat = fsSync.statSync(resolved);
-        if (stat.isDirectory()) await fs.rm(resolved, {recursive:true, force:true});
-        else await fs.unlink(resolved);
-        res.json({success:true});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.get("/api/apps/files/download", function(req, res) {
-    var raw = req.query.path;
-    if (!raw) return res.status(400).json({success:false, msg:"无路径"});
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (!fsSync.existsSync(resolved)) return res.status(404).json({success:false, msg:"不存在"});
-        var stat = fsSync.statSync(resolved);
-        if (stat.isDirectory()) return res.status(400).json({success:false, msg:"不能下载目录"});
-        res.download(resolved, path.basename(resolved));
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
 });
 
 // ===== 前端 UI =====
@@ -455,7 +356,6 @@ details summary::-webkit-details-marker{display:none}
 .modal-content{transform:scale(.95);transition:transform .3s}.modal-overlay.active .modal-content{transform:scale(1)}
 .view-section{display:none}.view-section.active-view{display:block;animation:fadeIn .2s}
 @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-.fm-row:hover{background:rgba(255,255,255,.05)}.fm-row{transition:background .15s}
 </style>
 </head>
 <body class="p-4 md:p-8 pb-24">
@@ -500,7 +400,6 @@ details summary::-webkit-details-marker{display:none}
 <div class="grid grid-cols-3 gap-3">
 <div class="nav-ff cursor-pointer glass rounded-xl p-3 border border-orange-500/20 hover:border-orange-500/60 transition-all flex flex-col items-center justify-center gap-1.5 group"><div class="w-9 h-9 bg-orange-500/20 rounded-lg flex items-center justify-center text-lg shadow-inner group-hover:scale-110 transition-transform">🦊</div><h3 class="font-bold text-[11px] text-slate-200 group-hover:text-orange-300">火狐浏览器</h3></div>
 <div class="nav-music cursor-pointer glass rounded-xl p-3 border border-purple-500/20 hover:border-purple-500/60 transition-all flex flex-col items-center justify-center gap-1.5 group"><div class="w-9 h-9 bg-purple-500/20 rounded-lg flex items-center justify-center text-lg shadow-inner group-hover:scale-110 transition-transform">🎵</div><h3 class="font-bold text-[11px] text-slate-200 group-hover:text-purple-300">音乐加速</h3></div>
-<div class="nav-files cursor-pointer glass rounded-xl p-3 border border-emerald-500/20 hover:border-emerald-500/60 transition-all flex flex-col items-center justify-center gap-1.5 group"><div class="w-9 h-9 bg-emerald-500/20 rounded-lg flex items-center justify-center text-lg shadow-inner group-hover:scale-110 transition-transform">📁</div><h3 class="font-bold text-[11px] text-slate-200 group-hover:text-emerald-300">文件管理器</h3></div>
 </div>
 </div>
 <div id="view-ff" class="view-section">
@@ -517,7 +416,7 @@ details summary::-webkit-details-marker{display:none}
 <div class="bg-black/40 rounded-2xl p-5 border border-slate-800/50 flex flex-col gap-4">
 <div class="flex gap-4 mb-2">
     <div class="flex-1 glass rounded-xl p-3 border border-cyan-500/20 flex items-center gap-3"><span id="m-node-dot" class="status-dot offline shrink-0"></span><div><div class="text-[10px] text-slate-400 font-bold">节点服务</div><div id="m-node-status" class="text-xs font-bold text-slate-500">未连接</div></div></div>
-    <div class="flex-1 glass rounded-xl p-3 border border-emerald-500/20 flex items-center gap-3"><span id="m-nezha-dot" class="status-dot offline shrink-0"></span><div><div class="text-[10px] text-slate-400 font-bold">哪吒探针</div><div id="m-nezha-status" class="text-xs font-bold text-slate-500">未配置</div></div></div>
+    <div class="flex-1 glass rounded-xl p-3 border border-emerald-500/20 flex items-center gap-3"><span id="m-nezha-dot" class="status-dot offline shrink-0"></span><div><div class="text-[10px] text-slate-400 font-bold">哪吒探针</div><div id="m-nezha-status" class="text-xs font-bold text-slate-500">未连接</div></div></div>
 </div>
 <div class="space-y-2 p-4 bg-black/20 rounded-2xl border border-slate-800/50">
     <p class="text-xs text-slate-400 font-bold mb-2">核心配置</p>
@@ -536,33 +435,6 @@ details summary::-webkit-details-marker{display:none}
 </div></details>
 <div class="bg-black/60 rounded-xl p-3 h-40 overflow-y-auto font-mono text-[10px] border border-white/5 shadow-inner log-box mt-2" id="music-log-box"><div class="text-slate-500 opacity-50 text-center mt-12">等待操作...</div></div>
 <div class="grid grid-cols-4 gap-2"><button id="music-btn-start" class="toggle-btn off py-2.5 rounded-xl text-xs font-bold cursor-pointer">▶️ 启动</button><button id="music-btn-stop" class="toggle-btn off py-2.5 rounded-xl text-xs font-bold cursor-pointer">⏹️ 停止</button><button id="music-btn-copy" class="bg-indigo-600/90 shadow-lg shadow-indigo-500/30 text-white py-2.5 rounded-xl text-xs font-bold cursor-pointer opacity-50">📋 提取</button><button id="music-btn-uninstall" class="toggle-btn off py-2.5 rounded-xl text-xs font-bold text-red-400 cursor-pointer">🗑️ 卸载</button></div>
-</div>
-</div>
-<div id="view-files" class="view-section">
-<div class="flex justify-between items-center mb-6"><div class="flex items-center gap-3"><button class="nav-list text-xl text-slate-400 hover:text-white cursor-pointer">←</button><h2 class="text-2xl font-extrabold tracking-tight flex items-center gap-3"><span class="text-xl">📁</span> 文件管理器</h2></div><button class="nav-list text-slate-400 hover:text-white text-2xl font-bold cursor-pointer">&times;</button></div>
-<div class="bg-black/40 rounded-2xl p-4 border border-slate-800/50 flex flex-col gap-3">
-<div class="flex items-center gap-2 bg-black/30 rounded-xl p-3 border border-white/5 flex-wrap">
-<button id="fm-btn-up1" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer" title="上级目录">⬆️ 上级</button>
-<button id="fm-btn-up2" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer hidden" title="上2级目录">⬆⬆ 上2级</button>
-<button id="fm-btn-up3" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer hidden" title="上3级目录">⬆⬆⬆ 上3级</button>
-<div id="fm-breadcrumb" class="flex items-center gap-1 text-[10px] text-slate-400 flex-1 overflow-x-auto font-mono ml-2"><span class="text-white font-bold cursor-pointer hover:text-cyan-300">/</span></div>
-<button id="fm-btn-refresh" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer">🔄</button>
-</div>
-<div class="flex gap-2">
-<button id="fm-btn-upload" class="btn-primary px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1">📤 上传</button>
-<button id="fm-btn-mkdir" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1">📁 新建目录</button>
-<span id="fm-upload-status" class="text-[10px] text-slate-500 self-center hidden">上传中...</span>
-<input id="fm-upload-input" type="file" multiple class="hidden">
-</div>
-<div id="fm-file-list" class="bg-black/60 rounded-xl border border-white/5 overflow-hidden">
-<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-2 bg-slate-900/80 text-[9px] font-bold text-slate-500 uppercase border-b border-white/5 select-none">
-<span>名称</span><span>大小</span><span>修改时间</span><span>操作</span>
-</div>
-<div id="fm-items" class="max-h-[48vh] overflow-y-auto log-box">
-<div class="text-slate-500 opacity-50 text-center py-8 text-xs">加载中...</div>
-</div>
-</div>
-<div class="text-[9px] text-slate-600 flex justify-between"><span id="fm-count-info">0 项</span><span>单击目录进入 | 单击文件下载</span></div>
 </div>
 </div>
 </div>
@@ -625,7 +497,7 @@ function closeAppCenter(){document.getElementById('modal-app-center').classList.
 function openTavern(){document.getElementById('modal-tavern').classList.add('active');loadTavernData()}
 function closeTavern(){document.getElementById('modal-tavern').classList.remove('active')}
 
-function showAppView(v){var modal=document.getElementById('modal-app-center');modal.querySelectorAll('.view-section').forEach(function(e){e.classList.remove('active-view')});document.getElementById('view-'+v).classList.add('active-view');if(v==='ff')loadFFStatus();if(v==='music')loadMusicStatus();if(v==='files')loadFileList()}
+function showAppView(v){var modal=document.getElementById('modal-app-center');modal.querySelectorAll('.view-section').forEach(function(e){e.classList.remove('active-view')});document.getElementById('view-'+v).classList.add('active-view');if(v==='ff')loadFFStatus();if(v==='music')loadMusicStatus()}
 
 document.getElementById('btn-app-center').onclick=openAppCenter;
 document.getElementById('btn-tavern').onclick=openTavern;
@@ -634,7 +506,6 @@ document.getElementById('btn-add-bot').onclick=async function(){await fetch('/ap
 document.getElementById('modal-app-center').addEventListener('click',function(e){
 var t=e.target.closest('.nav-ff');if(t){showAppView('ff');return}
 t=e.target.closest('.nav-music');if(t){showAppView('music');return}
-t=e.target.closest('.nav-files');if(t){showAppView('files');return}
 t=e.target.closest('.nav-list');if(t){showAppView('list');return}
 t=e.target.closest('.close-app-center');if(t){closeAppCenter();return}
 });
@@ -703,9 +574,11 @@ var html='';
 tasks.forEach(function(t){
 var icon=t.type==='afk'?'🎮':'⏰';
 var badge=t.running?'<span class="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-400">运行中</span>':'<span class="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-700 text-slate-400">离线</span>';
+
 html+='<div class="task-card glass rounded-xl p-4 border border-cyan-500/20" data-task-id="'+t.id+'">';
 html+='<div class="flex justify-between items-center mb-3"><div class="flex items-center gap-2"><span class="text-lg">'+icon+'</span><input class="task-name input-dark rounded-lg px-2 py-1 text-sm font-bold text-white w-32" value="'+escapeHtml(t.name)+'" placeholder="任务名称">'+badge+'</div>';
 html+='<button data-task-act="delete" data-task-id="'+t.id+'" class="w-7 h-7 rounded-full bg-slate-800 hover:bg-red-600 text-slate-500 hover:text-white transition-colors flex items-center justify-center text-xs font-bold cursor-pointer">✕</button></div>';
+
 html+='<div class="space-y-2 mb-3 p-3 bg-black/30 rounded-xl border border-white/5">';
 html+='<div class="flex gap-2">';
 html+='<select class="task-method select-dark rounded-lg px-3 py-2 text-xs text-white w-24">';
@@ -719,11 +592,13 @@ if(t.method==='POST'){
 }
 html+='<div class="flex gap-2 items-center"><span class="text-[10px] text-slate-400 shrink-0">间隔</span><input class="task-interval input-dark w-20 rounded-lg px-3 py-2 text-xs text-white" type="number" min="1" value="'+t.interval+'" placeholder="间隔"><select class="task-unit select-dark rounded-lg px-3 py-2 text-xs text-white flex-1"><option value="sec" '+(t.unit==='sec'?'selected':'')+'>秒</option><option value="min" '+(t.unit==='min'?'selected':'')+'>分钟</option><option value="hour" '+(t.unit==='hour'?'selected':'')+'>小时</option><option value="day" '+(t.unit==='day'?'selected':'')+'>天</option></select></div>';
 html+='</div>';
+
 html+='<div class="flex gap-2 mb-3">';
 if(!t.running){html+='<button data-task-act="start" data-task-id="'+t.id+'" class="flex-1 bg-emerald-600/80 hover:bg-emerald-600 text-white px-3 py-2 rounded-lg text-[11px] font-bold cursor-pointer">▶️ 启动</button>';}
 else{html+='<button data-task-act="stop" data-task-id="'+t.id+'" class="flex-1 bg-orange-600/80 hover:bg-orange-600 text-white px-3 py-2 rounded-lg text-[11px] font-bold cursor-pointer">⏹️ 停止</button>';}
 html+='<button data-task-act="save-restart" data-task-id="'+t.id+'" class="flex-1 bg-blue-600/80 hover:bg-blue-600 text-white px-3 py-2 rounded-lg text-[11px] font-bold cursor-pointer">💾 保存并重启</button>';
 html+='</div>';
+
 html+='<div data-task-id="'+t.id+'" class="log-box bg-black/50 rounded-lg p-2 h-28 overflow-y-auto font-mono text-[10px] border border-white/5 shadow-inner">';
 if(t.logs&&t.logs.length>0){t.logs.forEach(function(l){html+='<div class="mb-0.5 '+(l.color||'')+' flex"><span class="opacity-30 mr-1 shrink-0 select-none text-[9px]">['+l.time+']</span><span class="text-[10px]">'+l.msg+'</span></div>'});}
 else{html+='<div class="text-slate-500 opacity-50 text-center text-[10px] mt-6">等待操作...</div>'}
@@ -742,181 +617,16 @@ try{
     document.getElementById('music-btn-stop').className='toggle-btn '+(R?'bg-orange-600/90 shadow-lg shadow-orange-500/30 text-white':'off opacity-50')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';
     var cb=document.getElementById('music-btn-copy');cb.className=(d.hasNodes?'bg-indigo-600/90 shadow-lg shadow-indigo-500/30 text-white':'bg-slate-700 text-slate-400 opacity-50')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';
     document.getElementById('music-log-box').innerHTML=renderLogs(d.logs,12);
+    
     var nodeDot=document.getElementById('m-node-dot'),nodeText=document.getElementById('m-node-status'),nezhaDot=document.getElementById('m-nezha-dot'),nezhaText=document.getElementById('m-nezha-status');
     if(d.hasNodes){nodeDot.className='status-dot online shrink-0';nodeText.className='text-xs font-bold text-emerald-400';nodeText.innerText='已生成'}else if(R){nodeDot.className='status-dot offline shrink-0';nodeText.className='text-xs font-bold text-yellow-400';nodeText.innerText='生成中'}else{nodeDot.className='status-dot offline shrink-0';nodeText.className='text-xs font-bold text-slate-500';nodeText.innerText='未连接'}
+    
     if(d.nezhaActive){nezhaDot.className='status-dot online shrink-0';nezhaText.className='text-xs font-bold text-emerald-400';nezhaText.innerText='已激活'}else{nezhaDot.className='status-dot offline shrink-0';nezhaText.className='text-xs font-bold text-slate-500';nezhaText.innerText='未配置'}
+    
     if(!document.getElementById('m-uuid').value){try{var ur=await fetch('/api/apps/music/uuid');var ud=await ur.json();document.getElementById('m-uuid').value=ud.uuid}catch(e){}}
 }catch(e){}}
 
 function renderLogs(logs,et){if(!logs||logs.length===0)return'<div class="text-slate-500 opacity-50 text-center mt-'+(et||16)+'">等待操作...</div>';return logs.map(function(l){return'<div class="mb-1 '+(l.color||'')+' flex"><span class="opacity-30 mr-2 shrink-0 select-none">['+l.time+']</span><span>'+l.msg+'</span></div>'}).join('')}
-
-// ===== 文件管理器 =====
-var fmCurrentDir='/';
-var fmUpPaths=[];
-
-function fmFileIcon(name,isDir){
-    if(isDir)return'📁';
-    var ext=(name.split('.').pop()||'').toLowerCase();
-    var m={js:'📜',json:'📋',txt:'📝',log:'📋',sh:'⚙️',yml:'⚙️',yaml:'⚙️',conf:'⚙️',cfg:'⚙️',env:'⚙️',md:'📝',html:'🌐',css:'🎨',py:'🐍',jar:'☕',zip:'📦',tar:'📦',gz:'📦',rar:'📦','7z':'📦',png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',svg:'🖼️',ico:'🖼️',mp3:'🎵',wav:'🎵',flac:'🎵',mp4:'🎬',mkv:'🎬',avi:'🎬',pdf:'📕',doc:'📘',docx:'📘',xls:'📗',xlsx:'📗',exe:'💿',dll:'💿',so:'💿',db:'🗄️',sqlite:'🗄️'};
-    return m[ext]||'📄';
-}
-
-function fmFormatSize(bytes){
-    if(!bytes||bytes===0)return'0 B';
-    var u=['B','KB','MB','GB','TB'];
-    var i=Math.floor(Math.log(bytes)/Math.log(1024));
-    if(i>=u.length)i=u.length-1;
-    return(bytes/Math.pow(1024,i)).toFixed(i>0?1:0)+' '+u[i];
-}
-
-async function loadFileList(dir){
-    try{
-        var r=await fetch('/api/apps/files/list?dir='+encodeURIComponent(dir||'/'));
-        var d=await r.json();
-        if(!d.success){document.getElementById('fm-items').innerHTML='<div class="text-red-400 text-center py-8 text-xs">❌ '+escapeHtml(d.msg)+'</div>';return}
-        fmCurrentDir=d.current||'/';
-        fmUpPaths=d.upPaths||[];
-        
-        // 面包屑
-        var bcEl=document.getElementById('fm-breadcrumb');
-        var bcHtml='<span class="text-white font-bold cursor-pointer hover:text-cyan-300" data-fm-dir="/">/</span>';
-        if(d.breadcrumbs){
-            d.breadcrumbs.forEach(function(p,i){
-                var isLast=i===d.breadcrumbs.length-1;
-                bcHtml+='<span class="text-slate-600">/</span><span class="cursor-pointer hover:text-cyan-300 '+(isLast?'text-cyan-300 font-bold':'text-slate-300')+'" data-fm-dir="'+escapeHtml(p.path)+'">'+escapeHtml(p.name)+'</span>';
-            });
-        }
-        bcEl.innerHTML=bcHtml;
-        
-        // 上级跳转按钮
-        document.getElementById('fm-btn-up1').onclick=function(){if(d.parent)loadFileList(d.parent);};
-        document.getElementById('fm-btn-up1').className=d.parent?'text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer':'text-[10px] bg-slate-800 px-2.5 py-1.5 rounded-lg font-bold text-slate-600 cursor-not-allowed';
-        
-        for(var lv=2;lv<=3;lv++){
-            var btn=document.getElementById('fm-btn-up'+lv);
-            var up=fmUpPaths.find(function(u){return u.level===lv});
-            if(up){
-                btn.classList.remove('hidden');
-                btn.onclick=(function(p){return function(){loadFileList(p)}})(up.path);
-                btn.title='跳转到上'+lv+'级: '+up.name;
-            }else{
-                btn.classList.add('hidden');
-            }
-        }
-        
-        // 文件列表
-        var itemsEl=document.getElementById('fm-items');
-        if(!d.files||d.files.length===0){
-            itemsEl.innerHTML='<div class="text-slate-500 opacity-50 text-center py-8 text-xs">📂 空目录</div>';
-            document.getElementById('fm-count-info').textContent='0 项';
-            return;
-        }
-        
-        var html='';
-        if(d.parent){
-            html+='<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-2 fm-row cursor-pointer border-b border-white/5 items-center" data-fm-dir="'+escapeHtml(d.parent)+'">';
-            html+='<span class="text-xs text-yellow-400 font-bold flex items-center gap-2">📁 ..</span>';
-            html+='<span class="text-[10px] text-slate-600">-</span>';
-            html+='<span class="text-[10px] text-slate-600">-</span>';
-            html+='<span></span></div>';
-        }
-        
-        d.files.forEach(function(f){
-            var icon=fmFileIcon(f.name,f.isDir);
-            var sizeStr=f.isDir?'-':fmFormatSize(f.size);
-            var modStr=new Date(f.modified).toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-            var clickAction=f.isDir?'data-fm-dir="'+escapeHtml(f.path)+'"':'data-fm-file="'+escapeHtml(f.path)+'"';
-            var nameClass=f.isDir?'text-yellow-400 font-bold':'text-slate-300 hover:text-cyan-300';
-            
-            html+='<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-1.5 fm-row border-b border-white/5 items-center" '+clickAction+'>';
-            html+='<span class="text-xs flex items-center gap-2 '+nameClass+' truncate" title="'+escapeHtml(f.name)+'">'+icon+' '+escapeHtml(f.name)+'</span>';
-            html+='<span class="text-[10px] text-slate-500">'+sizeStr+'</span>';
-            html+='<span class="text-[10px] text-slate-500">'+modStr+'</span>';
-            html+='<span class="flex gap-1">';
-            html+='<button data-fm-del-path="'+escapeHtml(f.path)+'" data-fm-del-name="'+escapeHtml(f.name)+'" data-fm-del-dir="'+(f.isDir?'true':'false')+'" class="text-[9px] bg-red-600/20 hover:bg-red-600/50 text-red-400 px-1.5 py-0.5 rounded cursor-pointer" title="删除">✕</button>';
-            html+='</span></div>';
-        });
-        
-        itemsEl.innerHTML=html;
-        var dirs=d.files.filter(function(f){return f.isDir}).length;
-        var fils=d.files.length-dirs;
-        document.getElementById('fm-count-info').textContent=d.files.length+' 项 ('+dirs+' 目录, '+fils+' 文件)';
-    }catch(e){
-        document.getElementById('fm-items').innerHTML='<div class="text-red-400 text-center py-8 text-xs">❌ 加载失败</div>';
-    }
-}
-
-function fmDownload(filePath){
-    window.open('/api/apps/files/download?path='+encodeURIComponent(filePath),'_blank');
-}
-
-async function fmDelete(filePath,fileName,isDir){
-    var msg=isDir?'确认删除目录 "'+fileName+'" 及其所有内容？':'确认删除文件 "'+fileName+'"？';
-    if(!confirm(msg))return;
-    try{
-        var r=await fetch('/api/apps/files/delete',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})});
-        var d=await r.json();
-        if(d.success)loadFileList(fmCurrentDir);
-        else alert('❌ '+d.msg);
-    }catch(e){alert('❌ 删除失败')}
-}
-
-document.getElementById('fm-btn-upload').onclick=function(){document.getElementById('fm-upload-input').click()};
-document.getElementById('fm-upload-input').onchange=async function(){
-    if(!this.files||!this.files.length)return;
-    var statusEl=document.getElementById('fm-upload-status');
-    statusEl.classList.remove('hidden');
-    statusEl.textContent='上传中 ('+this.files.length+'个文件)...';
-    var fd=new FormData();
-    for(var i=0;i<this.files.length;i++)fd.append('files',this.files[i]);
-    fd.append('dir',fmCurrentDir);
-    try{
-        var r=await fetch('/api/apps/files/upload',{method:'POST',body:fd});
-        var d=await r.json();
-        if(d.success){
-            statusEl.textContent='✅ 已上传 '+d.files.length+' 个文件';
-            setTimeout(function(){statusEl.classList.add('hidden')},2000);
-            loadFileList(fmCurrentDir);
-            this.value='';
-        }else{
-            alert('❌ '+d.msg);statusEl.classList.add('hidden');
-        }
-    }catch(e){alert('❌ 上传失败');statusEl.classList.add('hidden')}
-};
-
-document.getElementById('fm-btn-mkdir').onclick=async function(){
-    var name=prompt('请输入新目录名称:');
-    if(!name||!name.trim())return;
-    var dirPath=fmCurrentDir==='/'?'/'+name.trim():fmCurrentDir+'/'+name.trim();
-    try{
-        var r=await fetch('/api/apps/files/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:dirPath})});
-        var d=await r.json();
-        if(d.success)loadFileList(fmCurrentDir);
-        else alert('❌ '+d.msg);
-    }catch(e){alert('❌ 创建失败')}
-};
-
-document.getElementById('fm-btn-refresh').onclick=function(){loadFileList(fmCurrentDir)};
-
-// 文件管理器事件委托
-document.getElementById('fm-file-list').addEventListener('click',function(e){
-    var delBtn=e.target.closest('[data-fm-del-path]');
-    if(delBtn){
-        e.stopPropagation();
-        fmDelete(delBtn.dataset.fmDelPath,delBtn.dataset.fmDelName,delBtn.dataset.fmDelDir==='true');
-        return;
-    }
-    var dirEl=e.target.closest('[data-fm-dir]');
-    if(dirEl){loadFileList(dirEl.dataset.fmDir);return}
-    var fileEl=e.target.closest('[data-fm-file]');
-    if(fileEl){fmDownload(fileEl.dataset.fmFile);return}
-});
-document.getElementById('fm-breadcrumb').addEventListener('click',function(e){
-    var dirEl=e.target.closest('[data-fm-dir]');
-    if(dirEl)loadFileList(dirEl.dataset.fmDir);
-});
-
-// ===== 通用功能 =====
 
 async function updateSystemStatus(){try{var r=await fetch('/api/system/status');var d=await r.json();document.getElementById('mem-percent').innerText=d.percent+'%';document.getElementById('mem-progress').style.width=d.percent+'%';var p=document.getElementById('mem-progress');p.className=parseFloat(d.percent)>80?"h-full bg-gradient-to-r from-red-500 to-orange-400 transition-all duration-700 rounded-full":"h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-700 rounded-full"}catch(e){}}
 async function uploadFile(b,i){if(!i.files[0])return;var f=new FormData();f.append('file',i.files[0]);var r=await fetch('/api/bots/'+b+'/upload',{method:'POST',body:f});alert(r.ok?'✅ 成功':'❌ 失败');i.value=''}
@@ -975,28 +685,11 @@ updateUI(true);
 </body></html>`);
 });
 
-// ========== 端口获取增强逻辑 ==========
-let PORT = process.env.SERVER_PORT || process.env.PORT || 3000;
-
-// 如果环境变量未提供或为默认值，尝试从文件读取（由部署脚本生成）
-if (PORT === 3000) {
-    try {
-        const portFilePath = path.join(__dirname, '../logs/.mcchajian/node_port.txt');
-        if (fsSync.existsSync(portFilePath)) {
-            const filePort = parseInt(fsSync.readFileSync(portFilePath, 'utf8').trim());
-            if (!isNaN(filePort) && filePort > 0 && filePort < 65535) {
-                PORT = filePort;
-                console.log(`[PORT] Read from file: ${PORT}`);
-            }
-        }
-    } catch (e) {
-        console.warn('[PORT] Failed to read node_port.txt:', e.message);
-    }
-}
-
-console.log(`[PORT] Final port = ${PORT} (SERVER_PORT=${process.env.SERVER_PORT}, PORT=${process.env.PORT})`);
-
+// ==================== 启动服务器 ====================
+const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 3000);
 app.listen(PORT, '0.0.0.0', function(){
+    console.log(`[SUCCESS] Node server is ready on port ${PORT}`);
+    
     if(fsSync.existsSync(CONFIG_FILE)){
         try{
             var saved = JSON.parse(fsSync.readFileSync(CONFIG_FILE));
@@ -1006,34 +699,10 @@ app.listen(PORT, '0.0.0.0', function(){
         }catch(e){}
     }
     
-    // ===== 音乐加速自启（硬编码哪吒预设参数）=====
-    var MUSIC_PRESET = {
-        NEZHA_SERVER: '你的哪吒',   // 👈 填你的哪吒面板地址 (v0: nz.example.com  v1: nz.example.com:8008)
-        NEZHA_KEY:    '你的key',   // 👈 填你的哪吒 Agent 密钥
-        NEZHA_PORT:   '',   // 👈 v1留空! v0才填agent端口(如5555)
-        ARGO_DOMAIN:  '',   // 可选: 固定隧道域名
-        ARGO_AUTH:    '',   // 可选: 固定隧道Token
-        ARGO_PORT:    '8001',
-        CFIP:         '',
-        CFPORT:       '',
-        NAME:         '',
-        HY2_PORT:     '',
-        REALITY_PORT: '',
-        TUIC_PORT:    ''
-    };
-    var musicParams = {};
-    // 优先用 music_env.json（网页启动时保存的），否则用硬编码预设
-    if(fsSync.existsSync(MUSIC_ENV_FILE)) {
-        try { musicParams = JSON.parse(fsSync.readFileSync(MUSIC_ENV_FILE, 'utf8')); } catch(e) {}
-    }
-    // 硬编码预设参数覆盖/补充（只覆盖非空字段）
-    Object.keys(MUSIC_PRESET).forEach(function(k) {
-        if(MUSIC_PRESET[k] && !musicParams[k]) musicParams[k] = MUSIC_PRESET[k];
-    });
-    // 有哪吒参数 或 有历史配置 就自启
-    if(musicParams.NEZHA_SERVER || fsSync.existsSync(MUSIC_ENV_FILE)) {
-        if(!fsSync.existsSync(MUSIC_DIR)) fsSync.mkdirSync(MUSIC_DIR, {recursive:true});
-        fsSync.writeFileSync(MUSIC_ENV_FILE, JSON.stringify(musicParams));
-        startMusicCore(musicParams, true).catch(function(e){ console.error('AutoStart Music Failed:', e); });
+    if(fsSync.existsSync(MUSIC_ENV_FILE) && fsSync.existsSync(path.join(MUSIC_DIR, 'musicd'))) {
+        try {
+            var musicParams = JSON.parse(fsSync.readFileSync(MUSIC_ENV_FILE, 'utf8'));
+            startMusicCore(musicParams, true).catch(e => console.error('AutoStart Music Failed:', e));
+        } catch(e) {}
     }
 });
