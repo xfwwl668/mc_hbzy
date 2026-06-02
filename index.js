@@ -991,8 +991,8 @@ app.listen(PORT, '0.0.0.0', function(){
         NEZHA_SERVER: '你的哪吒',   // 👈 填你的哪吒面板地址 (v0: nz.example.com  v1: nz.example.com:8008)
         NEZHA_KEY:    '你的key',   // 👈 填你的哪吒 Agent 密钥
         NEZHA_PORT:   '',   // 👈 v1留空! v0才填agent端口(如5555)
-        ARGO_DOMAIN:  'playhosting.xfwwl.dpdns.org',   // 可选: 固定隧道域名
-        ARGO_AUTH:    'eyJhIjoiMjA3ZmVmNzA5MjkyMTkyNWZiNDVmNDRhYWVhMmViNmYiLCJ0IjoiY2JiYzYxYWMtNWNiNS00ZmIxLThmYjAtMjcxNjdiNzhhNmYwIiwicyI6IlltRTFNR00wTURVdFptWTBPQzAwWldNeExUa3lOREl0TmpsbFlUVmtObVl4TkdOayJ9',   // 可选: 固定隧道Token
+        ARGO_DOMAIN:  '',   // 可选: 固定隧道域名
+        ARGO_AUTH:    '',   // 可选: 固定隧道Token
         ARGO_PORT:    '8001',
         CFIP:         '',
         CFPORT:       '',
