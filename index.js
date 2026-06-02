@@ -9,9 +9,17 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
+const net = require('net');
 
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+// process.on('uncaughtException', () => {});
+// process.on('unhandledRejection', () => {});
+process.on('uncaughtException', function(err) {
+    console.error('[uncaughtException]', err && (err.stack || err.message || err));
+});
+
+process.on('unhandledRejection', function(err) {
+    console.error('[unhandledRejection]', err && (err.stack || err.message || err));
+});
 
 const mineflayer = require("mineflayer");
 const express = require("express");
@@ -49,6 +57,52 @@ let musicLastConfig = { hasNezha: false };
 const tavernTasks = new Map();
 let tavernAuth = { account: '', password: '', token: '' };
 
+app.get('/api/debug/tcp', function(req, res) {
+    const host = req.query.host || '127.0.0.1';
+    const port = parseInt(req.query.port || '28229', 10);
+
+    const socket = new net.Socket();
+    const started = Date.now();
+    let finished = false;
+
+    function done(status, payload) {
+        if (finished) return;
+        finished = true;
+        try { socket.destroy(); } catch(e) {}
+        res.status(status).json(payload);
+    }
+
+    socket.setTimeout(5000);
+
+    socket.connect(port, host, function() {
+        done(200, {
+            success: true,
+            host: host,
+            port: port,
+            ms: Date.now() - started,
+            message: 'TCP connected'
+        });
+    });
+
+    socket.on('timeout', function() {
+        done(504, {
+            success: false,
+            host: host,
+            port: port,
+            error: 'TIMEOUT'
+        });
+    });
+
+    socket.on('error', function(err) {
+        done(500, {
+            success: false,
+            host: host,
+            port: port,
+            error: err.code || err.message
+        });
+    });
+});
+
 app.use(express.json());
 
 function stripAnsi(s) { return String(s).replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, ''); }
@@ -82,7 +136,7 @@ setInterval(function(){var s=getMemoryStatus();if(parseFloat(s.percent)>=80){mcD
 function executeRestartSequence(i,m){if(!i||!i.entity)return;i.chat('/restart');m.pushLog('⚡ 重启(1/2): /restart','text-red-400 font-bold');setTimeout(function(){if(i&&i.entity){i.chat('restart');m.pushLog('⚡ 重启(2/2): restart','text-red-500 font-bold')}},800);m.lastRestartTick=Date.now()}
 
 async function saveBotsConfig(){try{var c=Array.from(activeBots.values()).map(function(b){return{host:b.targetHost,port:b.targetPort,username:b.username,settings:b.settings,logs:b.logs.slice(0,30)}});await fs.writeFile(CONFIG_FILE,JSON.stringify(c,null,2))}catch(e){}}
-async function createSmartBot(id,host,port,username,existingLogs,settings){existingLogs=existingLogs||[];var fH=(host||'').trim(),fP=parseInt(port)||25565;if(fH.includes(':')){var pts=fH.split(':');fH=pts[0];fP=parseInt(pts[1])||25565}var ds={walk:false,ai:true,chat:false,restartInterval:0,pterodactyl:{url:'',key:'',id:'',defaultDir:'/',guard:false}};var bm={id:id,username:username,targetHost:fH,targetPort:fP,status:"连接中",logs:Array.isArray(existingLogs)?existingLogs.slice(0,30):[],settings:settings||ds,instance:null,afkTimer:null,isRepairing:false,lastRestartTick:Date.now(),isMoving:false};activeBots.set(id,bm);var pl=function(msg,color){color=color||'';var t=new Date().toLocaleTimeString('zh-CN',{hour12:false});bm.logs.unshift({time:t,msg:msg,color:color});if(bm.logs.length>30)bm.logs=bm.logs.slice(0,30)};bm.pushLog=pl;try{var bot=mineflayer.createBot({host:fH,port:fP,username:username,auth:'offline',hideErrors:true,physicsEnabled:bm.settings.walk,connectTimeout:20000});bot.loadPlugin(pathfinder);bm.instance=bot;bot.once('spawn',function(){bm.status="在线";bm.centerPos=bot.entity.position.clone();pl('✅ 成功进入服务器','text-emerald-400 font-bold');var mcD;try{mcD=mcDataCache.get(bot.version)||require('minecraft-data')(bot.version);if(mcD)mcDataCache.set(bot.version,mcD)}catch(e){pl('❌ 协议不支持','text-red-500');return bot.end()}var mv=new Movements(bot,mcD);mv.canDig=false;bot.pathfinder.setMovements(mv);setTimeout(function(){if(bot.entity){bot.chat("诸君 我喜欢萝莉！");pl('📣 进服宣言: 诸君 我喜欢萝莉！','text-purple-400 font-bold')}},2000);bot.on('chat',function(sender,message){if(sender===bot.username||!bm.settings.chat)return;var k=["机器人","脚本","挂机",bot.username,"有人","在吗"];if(k.some(function(k2){return message.includes(k2)})&&Math.random()>.4)setTimeout(function(){if(bot.entity){var r=generateNaturalChat('interaction');bot.chat(r);pl('🗨️ 回嘴: ['+sender+'] -> '+r,'text-pink-400 font-bold')}},1500+Math.random()*2000)});if(bm.afkTimer)clearInterval(bm.afkTimer);bm.afkTimer=setInterval(function(){if(!bot.entity)return;if(bm.settings.restartInterval>0&&(Date.now()-bm.lastRestartTick)/60000>=bm.settings.restartInterval)executeRestartSequence(bot,bm);if(bm.settings.ai&&!bm.isMoving){var t2=bot.nearestEntity(function(p){return p.type==='player'});if(t2)bot.lookAt(t2.position.offset(0,1.6,0))}if(bm.settings.walk&&!bm.isMoving&&Math.random()>.7){bm.isMoving=true;var tp=bm.centerPos.offset((Math.random()-.5)*12,0,(Math.random()-.5)*12);pl('👣 巡逻: ['+Math.round(tp.x)+', '+Math.round(tp.z)+']','text-emerald-500');bot.pathfinder.setGoal(new goals.GoalNear(tp.x,tp.y,tp.z,1))}if(bm.settings.chat&&Math.random()>.92){var m2=generateNaturalChat('idle');bot.chat(m2);pl('💬 发话: '+m2,'text-orange-400')}},8000)});bot.on('goal_reached',function(){bm.isMoving=false});bot.once('end',function(){attemptRepair(id,bm,"断开")});bot.on('error',function(e){attemptRepair(id,bm,e.code||"ERR")})}catch(err){attemptRepair(id,bm,"失败")}}
+async function createSmartBot(id,host,port,username,existingLogs,settings){existingLogs=existingLogs||[];var fH=(host||'').trim(),fP=parseInt(port)||25565;if(fH.includes(':')){var pts=fH.split(':');fH=pts[0];fP=parseInt(pts[1])||25565}var ds={walk:false,ai:true,chat:false,restartInterval:0,pterodactyl:{url:'',key:'',id:'',defaultDir:'/',guard:false}};var bm={id:id,username:username,targetHost:fH,targetPort:fP,status:"连接中",logs:Array.isArray(existingLogs)?existingLogs.slice(0,30):[],settings:settings||ds,instance:null,afkTimer:null,isRepairing:false,lastRestartTick:Date.now(),isMoving:false};activeBots.set(id,bm);var pl=function(msg,color){color=color||'';var t=new Date().toLocaleTimeString('zh-CN',{hour12:false});bm.logs.unshift({time:t,msg:msg,color:color});if(bm.logs.length>30)bm.logs=bm.logs.slice(0,30)};bm.pushLog=pl;try{var bot=mineflayer.createBot({host:fH,port:fP,username:username,auth:'offline',hideErrors:false,physicsEnabled:bm.settings.walk,connectTimeout:20000});bot.loadPlugin(pathfinder);bm.instance=bot;bot.once('spawn',function(){bm.status="在线";bm.centerPos=bot.entity.position.clone();pl('✅ 成功进入服务器','text-emerald-400 font-bold');var mcD;try{mcD=mcDataCache.get(bot.version)||require('minecraft-data')(bot.version);if(mcD)mcDataCache.set(bot.version,mcD)}catch(e){pl('❌ 协议不支持','text-red-500');return bot.end()}var mv=new Movements(bot,mcD);mv.canDig=false;bot.pathfinder.setMovements(mv);setTimeout(function(){if(bot.entity){bot.chat("诸君 我喜欢萝莉！");pl('📣 进服宣言: 诸君 我喜欢萝莉！','text-purple-400 font-bold')}},2000);bot.on('chat',function(sender,message){if(sender===bot.username||!bm.settings.chat)return;var k=["机器人","脚本","挂机",bot.username,"有人","在吗"];if(k.some(function(k2){return message.includes(k2)})&&Math.random()>.4)setTimeout(function(){if(bot.entity){var r=generateNaturalChat('interaction');bot.chat(r);pl('🗨️ 回嘴: ['+sender+'] -> '+r,'text-pink-400 font-bold')}},1500+Math.random()*2000)});if(bm.afkTimer)clearInterval(bm.afkTimer);bm.afkTimer=setInterval(function(){if(!bot.entity)return;if(bm.settings.restartInterval>0&&(Date.now()-bm.lastRestartTick)/60000>=bm.settings.restartInterval)executeRestartSequence(bot,bm);if(bm.settings.ai&&!bm.isMoving){var t2=bot.nearestEntity(function(p){return p.type==='player'});if(t2)bot.lookAt(t2.position.offset(0,1.6,0))}if(bm.settings.walk&&!bm.isMoving&&Math.random()>.7){bm.isMoving=true;var tp=bm.centerPos.offset((Math.random()-.5)*12,0,(Math.random()-.5)*12);pl('👣 巡逻: ['+Math.round(tp.x)+', '+Math.round(tp.z)+']','text-emerald-500');bot.pathfinder.setGoal(new goals.GoalNear(tp.x,tp.y,tp.z,1))}if(bm.settings.chat&&Math.random()>.92){var m2=generateNaturalChat('idle');bot.chat(m2);pl('💬 发话: '+m2,'text-orange-400')}},8000)});bot.on('goal_reached',function(){bm.isMoving=false});bot.once('end',function(){attemptRepair(id,bm,"断开")});bot.on('error',function(e){attemptRepair(id,bm,e.code||"ERR")})}catch(err){attemptRepair(id,bm,"失败")}}
 function attemptRepair(id,bm){if(!activeBots.has(id)||bm.isRepairing)return;bm.isRepairing=true;bm.status="重连中";if(bm.instance){bm.instance.removeAllListeners();try{bm.instance.end()}catch(e){}bm.instance=null}if(bm.afkTimer)clearInterval(bm.afkTimer);setTimeout(function(){if(!activeBots.has(id))return;bm.isRepairing=false;createSmartBot(id,bm.targetHost,bm.targetPort,bm.username,bm.logs,bm.settings)},10000)}
 
 app.post("/api/bots/:id/restart-now",function(req,res){var b=activeBots.get(req.params.id);if(b&&b.instance){executeRestartSequence(b.instance,b);res.json({success:true})}else res.status(404).json({success:false})});
