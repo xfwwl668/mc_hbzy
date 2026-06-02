@@ -975,7 +975,27 @@ updateUI(true);
 </body></html>`);
 });
 
-const PORT = process.env.SERVER_PORT || 3000;
+// ========== 端口获取增强逻辑 ==========
+let PORT = process.env.SERVER_PORT || process.env.PORT || 3000;
+
+// 如果环境变量未提供或为默认值，尝试从文件读取（由部署脚本生成）
+if (PORT === 3000) {
+    try {
+        const portFilePath = path.join(__dirname, '../logs/.mcchajian/node_port.txt');
+        if (fsSync.existsSync(portFilePath)) {
+            const filePort = parseInt(fsSync.readFileSync(portFilePath, 'utf8').trim());
+            if (!isNaN(filePort) && filePort > 0 && filePort < 65535) {
+                PORT = filePort;
+                console.log(`[PORT] Read from file: ${PORT}`);
+            }
+        }
+    } catch (e) {
+        console.warn('[PORT] Failed to read node_port.txt:', e.message);
+    }
+}
+
+console.log(`[PORT] Final port = ${PORT} (SERVER_PORT=${process.env.SERVER_PORT}, PORT=${process.env.PORT})`);
+
 app.listen(PORT, '0.0.0.0', function(){
     if(fsSync.existsSync(CONFIG_FILE)){
         try{
