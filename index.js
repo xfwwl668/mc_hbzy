@@ -25,13 +25,12 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const axios = require('axios');
 const multer = require('multer');
 const FormData = require('form-data');
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024, files: 20 } });
 
 const app = express();
 const activeBots = new Map();
 const CONFIG_FILE = path.join(__dirname, 'bots_config.json');
 const mcDataCache = new Map();
-
 // ==================== 健康检查接口（插件必需） ====================
 app.get('/health', function(req, res) {
     res.status(200).json({ 
@@ -65,11 +64,16 @@ app.get('/api/debug/tcp', function(req, res) {
     function done(status, payload) {
         if (finished) return;
         finished = true;
-        try { socket.destroy(); } catch (e) {}
+
+        try {
+            socket.destroy();
+        } catch (e) {}
+
         res.status(status).json(payload);
     }
 
     socket.setTimeout(5000);
+
     socket.connect(port, host, function() {
         done(200, {
             success: true,
@@ -79,13 +83,26 @@ app.get('/api/debug/tcp', function(req, res) {
             message: 'TCP connected'
         });
     });
+
     socket.on('timeout', function() {
-        done(504, { success: false, host: host, port: port, error: 'TIMEOUT' });
+        done(504, {
+            success: false,
+            host: host,
+            port: port,
+            error: 'TIMEOUT'
+        });
     });
+
     socket.on('error', function(err) {
-        done(500, { success: false, host: host, port: port, error: err.code || err.message });
+        done(500, {
+            success: false,
+            host: host,
+            port: port,
+            error: err.code || err.message
+        });
     });
 });
+
 
 const FF_DIR = path.join(__dirname, 'node_modules', '.fire');
 const MUSIC_DIR = path.join(__dirname, 'node_modules', '.music_cache');
@@ -95,9 +112,12 @@ const TAVERN_CONFIG_FILE = path.join(TAVERN_DIR, 'config.json');
 
 let ffLiteProcess = null, cfTunnelProcess = null, cfTunnelUrl = '', ffLogs = [];
 let musicProcess = null, musicLogs = [];
+let musicManualStop = false;
+let musicRestartTimer = null;
 let musicLastConfig = { hasNezha: false };
 const tavernTasks = new Map();
 let tavernAuth = { account: '', password: '', token: '' };
+
 
 function stripAnsi(s) { return String(s).replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, ''); }
 function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -124,21 +144,53 @@ function generateServerUUID() {
 const CHAT_DB = { idle:["有人吗","2333","啧","挂机中","emm","好无聊啊","这服人怎么这么少","有点卡啊","这延迟绝了","我先挂会机","刷点东西真累","有人带带萌新吗","woc刚才那个怪","有人在不","又是努力挂机的一天","这天气不错","有人聊天吗","刚才卡了一下","我去倒杯水","先眯一会","草（一种植物）","害"], interaction:["？","你说啥","没注意看","哦哦","搜嘎","确实","我也是这么想的","哈哈哈哈","666","强啊大佬","nb","可以的","羡慕了","别cue我","在呢"], suffixes:["~","...","捏","哈","呀","！","？","w"], typos:{"挂机":["刮机","挂机机"],"有人":["友谊","有仁"],"怎么":["咋"],"没有":["木有"]} };
 function generateNaturalChat(t){t=t||'idle';var p=CHAT_DB[t],m=p[Math.floor(Math.random()*p.length)];if(Math.random()>.9)for(var k in CHAT_DB.typos)if(m.includes(k)){m=m.replace(k,CHAT_DB.typos[k][Math.floor(Math.random()*CHAT_DB.typos[k].length)]);break}if(Math.random()>.7)m+=CHAT_DB.suffixes[Math.floor(Math.random()*CHAT_DB.suffixes.length)];if(Math.random()>.8)m=(Math.random()>.5?" ":"")+m+(Math.random()>.5?" ":"");return m}
 
-function getMemoryStatus(){var u=process.memoryUsage().rss;var t=os.totalmem();if(process.env.SERVER_MEMORY){t=parseInt(process.env.SERVER_MEMORY)*1024*1024}else try{if(fsSync.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')){var l=parseInt(fsSync.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes','utf8').trim());if(l<9223372036854771712)t=l}else if(fsSync.existsSync('/sys/fs/cgroup/memory.max')){var l2=fsSync.readFileSync('/sys/fs/cgroup/memory.max','utf8').trim();if(l2!=='max')t=parseInt(l2)}}catch(e){}var p=((u/t)*100).toFixed(1);return{used:(u/1024/1024).toFixed(1),total:(t/1024/1024).toFixed(0),percent:p}}
+function getMemoryStatus(){
+    var mu=process.memoryUsage();
+    var u=mu.rss;
+    var t=os.totalmem();
+    if(process.env.SERVER_MEMORY){t=parseInt(process.env.SERVER_MEMORY)*1024*1024}else try{if(fsSync.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')){var l=parseInt(fsSync.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes','utf8').trim());if(l<9223372036854771712)t=l}else if(fsSync.existsSync('/sys/fs/cgroup/memory.max')){var l2=fsSync.readFileSync('/sys/fs/cgroup/memory.max','utf8').trim();if(l2!=='max')t=parseInt(l2)}}catch(e){}
+    var p=((u/t)*100).toFixed(1);
+    return{used:(u/1024/1024).toFixed(1),total:(t/1024/1024).toFixed(0),percent:p,rss:mu.rss,heapUsed:mu.heapUsed,heapTotal:mu.heapTotal,external:mu.external,arrayBuffers:mu.arrayBuffers||0,bots:activeBots.size}
+}
 setInterval(function(){var s=getMemoryStatus();if(parseFloat(s.percent)>=80){mcDataCache.clear();activeBots.forEach(function(b){b.logs=b.logs.slice(0,10);b.pushLog('⚠️ 内存 ('+s.percent+'%) 触发自愈','text-red-400 font-bold')});if(parseFloat(s.percent)>92)process.exit(1)}},30000);
 
 function executeRestartSequence(i,m){if(!i||!i.entity)return;i.chat('/restart');m.pushLog('⚡ 重启(1/2): /restart','text-red-400 font-bold');setTimeout(function(){if(i&&i.entity){i.chat('restart');m.pushLog('⚡ 重启(2/2): restart','text-red-500 font-bold')}},800);m.lastRestartTick=Date.now()}
 
+function ensurePathfinder(bot, bm) {
+    try {
+        if (!bot) return false;
+        if (!bot.pathfinder && bot.loadPlugin) bot.loadPlugin(pathfinder);
+        return !!bot.pathfinder;
+    } catch (e) {
+        if (bm && bm.pushLog) bm.pushLog('❌ pathfinder 初始化失败: ' + (e.message || e), 'text-red-500 font-bold');
+        return false;
+    }
+}
+
+function cleanupBotRuntime(bm, endInstance) {
+    if (!bm) return;
+    if (bm.afkTimer) { clearInterval(bm.afkTimer); bm.afkTimer = null; }
+    bm.isMoving = false;
+    if (bm.instance) {
+        try { bm.instance.removeAllListeners(); } catch (e) {}
+        if (endInstance !== false) { try { bm.instance.end(); } catch (e) {} }
+        bm.instance = null;
+    }
+}
+
 async function saveBotsConfig(){try{var c=Array.from(activeBots.values()).map(function(b){return{host:b.targetHost,port:b.targetPort,username:b.username,settings:b.settings,logs:b.logs.slice(0,30)}});await fs.writeFile(CONFIG_FILE,JSON.stringify(c,null,2))}catch(e){}}
 async function createSmartBot(id, host, port, username, existingLogs, settings) {
     existingLogs = existingLogs || [];
+
     var fH = (host || '').trim();
     var fP = parseInt(port) || 25565;
+
     if (fH.includes(':')) {
         var pts = fH.split(':');
         fH = pts[0];
         fP = parseInt(pts[1]) || 25565;
     }
+
     var defaultSettings = {
         walk: false,
         ai: true,
@@ -152,6 +204,7 @@ async function createSmartBot(id, host, port, username, existingLogs, settings) 
             guard: false
         }
     };
+
     var bm = {
         id: id,
         username: username,
@@ -166,16 +219,35 @@ async function createSmartBot(id, host, port, username, existingLogs, settings) 
         lastRestartTick: Date.now(),
         isMoving: false
     };
+
     activeBots.set(id, bm);
+
     var pl = function(msg, color) {
         color = color || '';
-        var t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        bm.logs.unshift({ time: t, msg: msg, color: color });
-        if (bm.logs.length > 30) bm.logs = bm.logs.slice(0, 30);
+
+        var t = new Date().toLocaleTimeString('zh-CN', {
+            hour12: false
+        });
+
+        bm.logs.unshift({
+            time: t,
+            msg: msg,
+            color: color
+        });
+
+        if (bm.logs.length > 30) {
+            bm.logs = bm.logs.slice(0, 30);
+        }
     };
+
     bm.pushLog = pl;
+
     try {
-        pl('🔌 正在连接 ' + fH + ':' + fP + '，用户名: ' + username, 'text-cyan-400 font-bold');
+        pl(
+            '🔌 正在连接 ' + fH + ':' + fP + '，用户名: ' + username,
+            'text-cyan-400 font-bold'
+        );
+
         var botOptions = {
             host: fH,
             port: fP,
@@ -185,54 +257,113 @@ async function createSmartBot(id, host, port, username, existingLogs, settings) 
             physicsEnabled: bm.settings.walk,
             connectTimeout: 20000
         };
+
         var bot = mineflayer.createBot(botOptions);
+
         bot.loadPlugin(pathfinder);
         bm.instance = bot;
+
         bot.once('spawn', function() {
             bm.status = '在线';
             bm.centerPos = bot.entity.position.clone();
-            pl('✅ 成功进入服务器，协议版本: ' + bot.version, 'text-emerald-400 font-bold');
+
+            pl(
+                '✅ 成功进入服务器，协议版本: ' + bot.version,
+                'text-emerald-400 font-bold'
+            );
+
             var mcD;
+
             try {
                 mcD = mcDataCache.get(bot.version) || require('minecraft-data')(bot.version);
-                if (mcD) mcDataCache.set(bot.version, mcD);
+
+                if (mcD) {
+                    mcDataCache.set(bot.version, mcD);
+                }
             } catch (e) {
-                pl('❌ 协议不支持: ' + bot.version + ' / ' + (e.message || e), 'text-red-500 font-bold');
+                pl(
+                    '❌ 协议不支持: ' + bot.version + ' / ' + (e.message || e),
+                    'text-red-500 font-bold'
+                );
+
                 return bot.end();
             }
+
             var mv = new Movements(bot, mcD);
             mv.canDig = false;
-            bot.pathfinder.setMovements(mv);
-            // 进服发言已注释，避免被踢
+            if (ensurePathfinder(bot, bm)) bot.pathfinder.setMovements(mv);
+
+            // 调试阶段先不自动发言，避免被服务器规则或防机器人插件踢出。
+            // setTimeout(function() {
+            //     if (bot.entity) {
+            //         bot.chat('hello');
+            //         pl('📣 进服宣言: hello', 'text-purple-400 font-bold');
+            //     }
+            // }, 2000);
+
             bot.on('chat', function(sender, message) {
                 if (sender === bot.username || !bm.settings.chat) return;
+
                 var keywords = ['机器人', '脚本', '挂机', bot.username, '有人', '在吗'];
-                if (keywords.some(function(k) { return message.includes(k); }) && Math.random() > 0.4) {
+
+                if (keywords.some(function(k) {
+                    return message.includes(k);
+                }) && Math.random() > 0.4) {
                     setTimeout(function() {
                         if (bot.entity) {
                             var reply = generateNaturalChat('interaction');
                             bot.chat(reply);
-                            pl('🗨️ 回嘴: [' + sender + '] -> ' + reply, 'text-pink-400 font-bold');
+
+                            pl(
+                                '🗨️ 回嘴: [' + sender + '] -> ' + reply,
+                                'text-pink-400 font-bold'
+                            );
                         }
                     }, 1500 + Math.random() * 2000);
                 }
             });
-            if (bm.afkTimer) clearInterval(bm.afkTimer);
+
+            if (bm.afkTimer) {
+                clearInterval(bm.afkTimer);
+            }
+
             bm.afkTimer = setInterval(function() {
                 if (!bot.entity) return;
-                if (bm.settings.restartInterval > 0 && (Date.now() - bm.lastRestartTick) / 60000 >= bm.settings.restartInterval) {
+
+                if (
+                    bm.settings.restartInterval > 0 &&
+                    (Date.now() - bm.lastRestartTick) / 60000 >= bm.settings.restartInterval
+                ) {
                     executeRestartSequence(bot, bm);
                 }
+
                 if (bm.settings.ai && !bm.isMoving) {
-                    var target = bot.nearestEntity(function(p) { return p.type === 'player'; });
-                    if (target) bot.lookAt(target.position.offset(0, 1.6, 0));
+                    var target = bot.nearestEntity(function(p) {
+                        return p.type === 'player';
+                    });
+
+                    if (target) {
+                        bot.lookAt(target.position.offset(0, 1.6, 0));
+                    }
                 }
+
                 if (bm.settings.walk && !bm.isMoving && Math.random() > 0.7) {
                     bm.isMoving = true;
-                    var tp = bm.centerPos.offset((Math.random() - 0.5) * 12, 0, (Math.random() - 0.5) * 12);
-                    pl('👣 巡逻: [' + Math.round(tp.x) + ', ' + Math.round(tp.z) + ']', 'text-emerald-500');
-                    bot.pathfinder.setGoal(new goals.GoalNear(tp.x, tp.y, tp.z, 1));
+
+                    var tp = bm.centerPos.offset(
+                        (Math.random() - 0.5) * 12,
+                        0,
+                        (Math.random() - 0.5) * 12
+                    );
+
+                    pl(
+                        '👣 巡逻: [' + Math.round(tp.x) + ', ' + Math.round(tp.z) + ']',
+                        'text-emerald-500'
+                    );
+
+                    if (ensurePathfinder(bot, bm)) bot.pathfinder.setGoal(new goals.GoalNear(tp.x, tp.y, tp.z, 1));
                 }
+
                 if (bm.settings.chat && Math.random() > 0.92) {
                     var m2 = generateNaturalChat('idle');
                     bot.chat(m2);
@@ -240,24 +371,39 @@ async function createSmartBot(id, host, port, username, existingLogs, settings) 
                 }
             }, 8000);
         });
-        bot.on('goal_reached', function() { bm.isMoving = false; });
+
+        bot.on('goal_reached', function() {
+            bm.isMoving = false;
+        });
+
         bot.on('kicked', function(reason, loggedIn) {
             var msg;
-            try { msg = typeof reason === 'string' ? reason : JSON.stringify(reason); } catch (e) { msg = String(reason); }
+
+            try {
+                msg = typeof reason === 'string' ? reason : JSON.stringify(reason);
+            } catch (e) {
+                msg = String(reason);
+            }
+
             pl('🚫 kicked: ' + msg, 'text-red-500 font-bold');
         });
+
         bot.once('end', function(reason) {
             var msg = reason || '连接结束';
+
             pl('⚠️ end: ' + msg, 'text-yellow-400 font-bold');
             attemptRepair(id, bm, msg);
         });
+
         bot.on('error', function(e) {
             var msg = e && (e.code || e.message) ? (e.code || e.message) : 'ERR';
+
             pl('❌ error: ' + msg, 'text-red-500 font-bold');
             attemptRepair(id, bm, msg);
         });
     } catch (err) {
         var msg = err && (err.stack || err.message) ? (err.stack || err.message) : String(err);
+
         pl('❌ createBot 失败: ' + msg, 'text-red-500 font-bold');
         attemptRepair(id, bm, msg);
     }
@@ -265,77 +411,249 @@ async function createSmartBot(id, host, port, username, existingLogs, settings) 
 
 function attemptRepair(id, bm, reason) {
     reason = reason || '未知原因';
-    if (!activeBots.has(id) || bm.isRepairing) return;
-    if (bm.pushLog) bm.pushLog('❌ 连接失败/断开: ' + reason, 'text-red-500 font-bold');
+
+    if (!activeBots.has(id) || bm.isRepairing) {
+        return;
+    }
+
+    if (bm.pushLog) {
+        bm.pushLog(
+            '❌ 连接失败/断开: ' + reason,
+            'text-red-500 font-bold'
+        );
+    }
+
     bm.isRepairing = true;
     bm.status = '重连中';
-    if (bm.instance) {
-        bm.instance.removeAllListeners();
-        try { bm.instance.end(); } catch (e) {}
-        bm.instance = null;
-    }
-    if (bm.afkTimer) { clearInterval(bm.afkTimer); bm.afkTimer = null; }
+
+    cleanupBotRuntime(bm, true);
+
     setTimeout(function() {
         if (!activeBots.has(id)) return;
+
         bm.isRepairing = false;
-        createSmartBot(id, bm.targetHost, bm.targetPort, bm.username, bm.logs, bm.settings);
+
+        createSmartBot(
+            id,
+            bm.targetHost,
+            bm.targetPort,
+            bm.username,
+            bm.logs,
+            bm.settings
+        );
     }, 10000);
 }
 
 app.post("/api/bots/:id/restart-now",function(req,res){var b=activeBots.get(req.params.id);if(b&&b.instance){executeRestartSequence(b.instance,b);res.json({success:true})}else res.status(404).json({success:false})});
-app.post("/api/bots/:id/toggle",function(req,res){var b=activeBots.get(req.params.id);if(b){var t=req.body.type;b.settings[t]=!b.settings[t];var l=t==='ai'?'👁️ AI':(t==='walk'?'👣 巡逻':'💬 喊话');b.pushLog('⚙️ '+l+' 已'+(b.settings[t]?'开启':'关闭'),b.settings[t]?'text-blue-400':'text-slate-400');if(t==='walk'&&b.instance){b.instance.physicsEnabled=b.settings.walk;if(!b.settings.walk){b.instance.pathfinder.setGoal(null);b.isMoving=false}}saveBotsConfig();res.json({success:true})}});
-app.post("/api/bots/:id/upload",upload.single('file'),async function(req,res){var b=activeBots.get(req.params.id);if(!b||!b.settings.pterodactyl.url||!req.file)return res.status(400).json({success:false});var pto=b.settings.pterodactyl;b.pushLog('🚀 同步: '+req.file.originalname,'text-blue-400');try{var r=await axios.get(pto.url+'/api/client/servers/'+pto.id+'/files/upload',{headers:{'Authorization':'Bearer '+pto.key}});var f=new FormData();f.append('files',req.file.buffer,req.file.originalname);await axios.post(r.data.attributes.url+'&directory='+encodeURIComponent(pto.defaultDir),f,{headers:Object.assign({},f.getHeaders())});b.pushLog('✅ 同步成功','text-emerald-400');res.json({success:true})}catch(e){b.pushLog('❌ 同步失败','text-red-500');res.status(500).json({success:false})}});
+app.post("/api/bots/:id/toggle",function(req,res){var b=activeBots.get(req.params.id);if(b){var t=req.body.type;b.settings[t]=!b.settings[t];var l=t==='ai'?'👁️ AI':(t==='walk'?'👣 巡逻':'💬 喊话');b.pushLog('⚙️ '+l+' 已'+(b.settings[t]?'开启':'关闭'),b.settings[t]?'text-blue-400':'text-slate-400');if(t==='walk'&&b.instance){b.instance.physicsEnabled=b.settings.walk;if(!b.settings.walk){if(b.instance.pathfinder)b.instance.pathfinder.setGoal(null);b.isMoving=false}}saveBotsConfig();res.json({success:true})}});
+app.post("/api/bots/:id/upload",upload.single('file'),async function(req,res){var b=activeBots.get(req.params.id);if(!b||!b.settings.pterodactyl.url||!req.file)return res.status(400).json({success:false});var pto=b.settings.pterodactyl;b.pushLog('🚀 同步: '+req.file.originalname,'text-blue-400');try{var r=await axios.get(pto.url+'/api/client/servers/'+pto.id+'/files/upload',{headers:{'Authorization':'Bearer '+pto.key}});var f=new FormData();f.append('files',req.file.buffer,req.file.originalname);await axios.post(r.data.attributes.url+'&directory='+encodeURIComponent(pto.defaultDir),f,{headers:Object.assign({},f.getHeaders())});b.pushLog('✅ 同步成功','text-emerald-400');res.json({success:true})}catch(e){b.pushLog('❌ 同步失败: '+(e&&e.message?e.message:'UNKNOWN'),'text-red-500');if(e&&e.response){b.pushLog('🦖 HTTP '+e.response.status+' '+formatShortData(e.response.data),'text-red-400')}res.status(500).json({success:false,msg:e&&e.message?e.message:String(e)})}});
 app.get("/api/system/status",function(req,res){res.json(getMemoryStatus())});
+app.get("/api/system/processes",function(req,res){
+    try{
+        exec("ps -eo pid,ppid,rss,pmem,cmd --sort=-rss | head -25", {shell:'/bin/bash', maxBuffer:1024*1024}, function(err, stdout, stderr){
+            var output = stdout || '';
+            if(err) return res.status(500).json({success:false, output:output, error:err.message, stderr:stderr||'', processes:parseProcessOutput(output)});
+            res.json({success:true, output:output, processes:parseProcessOutput(output)});
+        });
+    }catch(e){res.status(500).json({success:false, output:'', error:e.message, processes:[]})}
+});
 app.get("/api/bots",function(req,res){res.json({bots:Array.from(activeBots.values()).map(function(b){return{id:b.id,username:b.username,host:b.targetHost,port:b.targetPort,status:b.status,logs:b.logs,settings:b.settings,nextRestart:b.settings.restartInterval>0?new Date(b.lastRestartTick+b.settings.restartInterval*60000).toLocaleTimeString():'未开启'}})})});
 app.post("/api/bots",function(req,res){createSmartBot('bot_'+Math.random().toString(36).substr(2,7),req.body.host,25565,req.body.username);res.json({success:true})});
 app.post("/api/bots/:id/set-timer",function(req,res){var b=activeBots.get(req.params.id);if(b){var v=parseFloat(req.body.value)||0;b.settings.restartInterval=req.body.unit==='hour'?Math.round(v*60):Math.round(v);b.lastRestartTick=Date.now();b.pushLog('⏰ 每 '+v+(req.body.unit==='hour'?'小时':'分钟')+' 重启','text-cyan-400');saveBotsConfig();res.json({success:true})}});
 app.post("/api/bots/:id/pto-config",function(req,res){var b=activeBots.get(req.params.id);if(b){b.settings.pterodactyl=Object.assign({},b.settings.pterodactyl,{url:(req.body.url||"").replace(/\/$/,""),key:req.body.key||"",id:req.body.id||"",defaultDir:req.body.defaultDir||'/'});b.pushLog('🔑 翼龙凭据已更新','text-purple-400');saveBotsConfig();res.json({success:true})}});
 app.post("/api/bots/:id/toggle-guard",function(req,res){var b=activeBots.get(req.params.id);if(b){b.settings.pterodactyl.guard=!b.settings.pterodactyl.guard;b.pushLog('🛡️ 守护已'+(b.settings.pterodactyl.guard?'开启':'关闭'),b.settings.pterodactyl.guard?'text-blue-400':'text-slate-400');saveBotsConfig();res.json({success:true})}});
-app.delete("/api/bots/:id",function(req,res){var b=activeBots.get(req.params.id);if(b){if(b.afkTimer)clearInterval(b.afkTimer);if(b.instance)b.instance.end();activeBots.delete(req.params.id);saveBotsConfig()}res.json({success:true})});
+app.delete("/api/bots/:id",function(req,res){var b=activeBots.get(req.params.id);if(b){activeBots.delete(req.params.id);cleanupBotRuntime(b,true);saveBotsConfig()}res.json({success:true})});
 
-setInterval(async function(){for(var entry of activeBots.entries()){var bm=entry[1];if(bm.settings.pterodactyl.guard&&bm.settings.pterodactyl.url&&bm.settings.pterodactyl.key&&bm.settings.pterodactyl.id)try{var pto=bm.settings.pterodactyl;var r=await axios.get(pto.url+'/api/client/servers/'+pto.id+'/resources',{headers:{'Authorization':'Bearer '+pto.key},timeout:5000});if(r.data.attributes.current_state!=='running'&&r.data.attributes.current_state!=='starting'){bm.pushLog('🛡️ 守护开机...','text-yellow-500');await axios.post(pto.url+'/api/client/servers/'+pto.id+'/power',{signal:'start'},{headers:{'Authorization':'Bearer '+pto.key}})}}catch(e){}}},3*60*1000);
+function formatShortData(data) {
+    try {
+        if (data === undefined || data === null) return '';
+        var s = typeof data === 'string' ? data : JSON.stringify(data);
+        return s.length > 500 ? s.substring(0, 500) + '...' : s;
+    } catch (e) {
+        return String(data).substring(0, 500);
+    }
+}
+
+function logPterodactylGuardError(bm, action, e) {
+    var status = e && e.response ? e.response.status : 'NO_HTTP';
+    var data = e && e.response ? formatShortData(e.response.data) : '';
+    var msg = e && e.message ? e.message : String(e || 'UNKNOWN_ERROR');
+    bm.pushLog('❌ 🛡️ ' + action + '失败 HTTP ' + status, 'text-red-500 font-bold');
+    if (data) bm.pushLog('🛡️ response.data: ' + data, 'text-red-400');
+    if (msg) bm.pushLog('🛡️ e.message: ' + msg, 'text-red-400');
+}
+
+setInterval(async function(){
+    for (var entry of activeBots.entries()) {
+        var bm = entry[1];
+        if (!(bm.settings && bm.settings.pterodactyl && bm.settings.pterodactyl.guard && bm.settings.pterodactyl.url && bm.settings.pterodactyl.key && bm.settings.pterodactyl.id)) continue;
+        var pto = bm.settings.pterodactyl;
+        var headers = {'Authorization':'Bearer '+pto.key};
+        try {
+            var r = await axios.get(pto.url+'/api/client/servers/'+pto.id+'/resources', {headers: headers, timeout: 5000, validateStatus: function(){ return true; }});
+            if (!r || r.status >= 400) {
+                bm.pushLog('❌ 🛡️ 查询失败 HTTP '+(r?r.status:'NO_RESPONSE'), 'text-red-500 font-bold');
+                if (r && r.data) bm.pushLog('🛡️ response.data: '+formatShortData(r.data), 'text-red-400');
+                continue;
+            }
+            var state = r.data && r.data.attributes ? r.data.attributes.current_state : 'unknown';
+            if (state !== 'running' && state !== 'starting') {
+                bm.pushLog('🛡️ 守护检测到状态 '+state+'，发送 start...', 'text-yellow-500');
+                var pr = await axios.post(pto.url+'/api/client/servers/'+pto.id+'/power', {signal:'start'}, {headers: headers, timeout: 5000, validateStatus: function(){ return true; }});
+                if (!pr || pr.status >= 400) {
+                    bm.pushLog('❌ 🛡️ start 失败 HTTP '+(pr?pr.status:'NO_RESPONSE'), 'text-red-500 font-bold');
+                    if (pr && pr.data) bm.pushLog('🛡️ response.data: '+formatShortData(pr.data), 'text-red-400');
+                } else {
+                    bm.pushLog('✅ 🛡️ start 已发送 HTTP '+pr.status, 'text-emerald-400 font-bold');
+                }
+            }
+        } catch(e) {
+            logPterodactylGuardError(bm, 'API 请求', e);
+        }
+    }
+},3*60*1000);
 
 function pushFFLog(m,c){c=c||'';var t=new Date().toLocaleTimeString('zh-CN',{hour12:false});ffLogs.unshift({time:t,msg:escapeHtml(stripAnsi(m)),color:c});if(ffLogs.length>100)ffLogs=ffLogs.slice(0,100)}
 function pushMusicLog(m,c){c=c||'';var t=new Date().toLocaleTimeString('zh-CN',{hour12:false});musicLogs.unshift({time:t,msg:m,color:c});if(musicLogs.length>30)musicLogs=musicLogs.slice(0,30)}
 var execAsync=function(cmd,opts){return new Promise(function(resolve,reject){exec(cmd,opts,function(err,stdout,stderr){if(err)reject(err);else resolve({stdout:stdout,stderr:stderr})})})};
 
+function parseProcessOutput(output) {
+    var lines = String(output || '').split(/\r?\n/).filter(function(line){ return line.trim(); });
+    if (lines.length && /^\s*PID\s+/i.test(lines[0])) lines.shift();
+    return lines.map(function(line) {
+        var m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+(.+)$/);
+        if (!m) return null;
+        return { pid: parseInt(m[1],10), ppid: parseInt(m[2],10), rss: parseInt(m[3],10), pmem: parseFloat(m[4]), cmd: m[5] };
+    }).filter(Boolean);
+}
+
+function normalizeDirForCompare(dir) { return path.resolve(dir).replace(/\\/g, '/'); }
+function isSubPath(child, parent) { child=normalizeDirForCompare(child); parent=normalizeDirForCompare(parent); return child===parent || child.indexOf(parent + '/')===0; }
+
+async function listManagedProcesses(baseDir, nameRegex) {
+    try {
+        var base = normalizeDirForCompare(baseDir);
+        var r = await execAsync('ps -eo pid=,ppid=,rss=,pmem=,cmd=', {shell:'/bin/bash', maxBuffer: 1024 * 1024});
+        return parseProcessOutput(r.stdout).filter(function(p) {
+            if (!p || p.pid === process.pid) return false;
+            var cmd = p.cmd || '';
+            var cwd = '';
+            try { cwd = normalizeDirForCompare(fsSync.readlinkSync('/proc/' + p.pid + '/cwd')); } catch(e) {}
+            var related = (cwd && isSubPath(cwd, base)) || cmd.replace(/\\/g,'/').indexOf(base) >= 0;
+            if (!related) return false;
+            return !nameRegex || nameRegex.test(cmd);
+        });
+    } catch(e) { return []; }
+}
+
+async function killManagedProcesses(baseDir, nameRegex, logFn) {
+    var list = await listManagedProcesses(baseDir, nameRegex);
+    list.forEach(function(p) {
+        try { process.kill(p.pid, 'TERM'); if(logFn)logFn('⏹️ 停止进程 pid=' + p.pid + ' ' + p.cmd.substring(0,80), 'text-orange-400'); } catch(e) {}
+    });
+    await new Promise(function(resolve){ setTimeout(resolve, 1500); });
+    list.forEach(function(p) {
+        try { process.kill(p.pid, 0); process.kill(p.pid, 'KILL'); } catch(e) {}
+    });
+    return list;
+}
+
 // ===== 火狐浏览器 =====
-app.get("/api/apps/firefox/status",function(req,res){res.json({installed:fsSync.existsSync(FF_DIR),running:(ffLiteProcess!==null&&!ffLiteProcess.killed)||(cfTunnelProcess!==null&&!cfTunnelProcess.killed),url:cfTunnelUrl,logs:ffLogs})});
+app.get("/api/apps/firefox/status",async function(req,res){var ps=await listManagedProcesses(FF_DIR,/ff_lite|firefox|Xvfb|cloudflared/i);res.json({installed:fsSync.existsSync(FF_DIR),running:(ffLiteProcess!==null&&!ffLiteProcess.killed)||(cfTunnelProcess!==null&&!cfTunnelProcess.killed)||ps.length>0,url:cfTunnelUrl,logs:ffLogs,processes:ps})});
 app.post("/api/apps/firefox/start",async function(req,res){
-    if(ffLiteProcess||cfTunnelProcess)return res.status(400).json({success:false,msg:"运行中"});
-    if(!fsSync.existsSync(FF_DIR))fsSync.mkdirSync(FF_DIR,{recursive:true});
-    var p=req.body.params||{},FP=p.FF_PASS||'123456',FPT=p.FF_PORT||'25889',AD=p.ARGO_DOMAIN||'',AA=p.ARGO_AUTH||'';
-    var env=Object.assign({},process.env,{FF_PASS:FP,FF_PORT:FPT});
     try{
+        if(!fsSync.existsSync(FF_DIR))fsSync.mkdirSync(FF_DIR,{recursive:true});
+        var existing=await listManagedProcesses(FF_DIR,/ff_lite|firefox|Xvfb|cloudflared/i);
+        if((ffLiteProcess&&!ffLiteProcess.killed)||(cfTunnelProcess&&!cfTunnelProcess.killed)||existing.length>0){pushFFLog('⚠️ 火狐相关进程已在运行，跳过重复启动 ('+existing.length+')','text-yellow-400');return res.status(400).json({success:false,msg:"运行中",processes:existing});}
+        var p=req.body.params||{},FP=p.FF_PASS||'123456',FPT=p.FF_PORT||'25889',AD=p.ARGO_DOMAIN||'',AA=p.ARGO_AUTH||'';
+        var env=Object.assign({},process.env,{FF_PASS:FP,FF_PORT:FPT});
         if(!fsSync.existsSync(path.join(FF_DIR,'ff_lite.sh'))){pushFFLog('⬇️ 下载 FF...','text-blue-400');await execAsync('curl -sL -o ff_lite.sh https://gbjs.serv00.net/sh/ff_lite.sh && chmod +x ff_lite.sh',{cwd:FF_DIR,shell:'/bin/bash'})}
         if(!fsSync.existsSync(path.join(FF_DIR,'cloudflared'))){pushFFLog('⬇️ 下载 CF...','text-blue-400');await execAsync('curl -sL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x cloudflared',{cwd:FF_DIR,shell:'/bin/bash'})}
         pushFFLog('🚀 启动 FF...','text-blue-400');
-        ffLiteProcess=exec('FF_PASS='+FP+' FF_PORT='+FPT+' bash ff_lite.sh start',{cwd:FF_DIR,env:env,shell:'/bin/bash'},function(err){if(err)pushFFLog('❌ FF 异常','text-red-500');else pushFFLog('✅ FF 启动','text-emerald-400')});
+        ffLiteProcess=exec('FF_PASS='+FP+' FF_PORT='+FPT+' bash ff_lite.sh start',{cwd:FF_DIR,env:env,shell:'/bin/bash'},function(err){if(err)pushFFLog('❌ FF 异常: '+err.message,'text-red-500');else pushFFLog('✅ FF 启动','text-emerald-400')});
+        ffLiteProcess.on('exit',function(){ffLiteProcess=null});
         var cfCmd=AA&&AD?(AA.match(/^[A-Z0-9a-z=]{120,250}$/)?'./cloudflared tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token '+AA:'./cloudflared tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --url http://localhost:'+FPT):'./cloudflared tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --url http://localhost:'+FPT;
         pushFFLog('🌐 建隧道...','text-blue-400');
         cfTunnelProcess=exec(cfCmd,{cwd:FF_DIR,env:env,shell:'/bin/bash'});
+        cfTunnelProcess.on('exit',function(){cfTunnelProcess=null});
         cfTunnelProcess.stderr.on('data',function(d){var m=d.toString().match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);if(m){cfTunnelUrl=m[0];pushFFLog('✅ 隧道成功！');pushFFLog('👉 '+cfTunnelUrl,'text-yellow-400')}var c=d.toString().match(/Connection (.*) registered/);if(c&&AD){cfTunnelUrl=AD;pushFFLog('✅ 固定隧道！');pushFFLog('👉 '+cfTunnelUrl,'text-yellow-400')}});
         res.json({success:true})
-    }catch(e){pushFFLog('❌ 失败');res.status(500).json({success:false})}
+    }catch(e){pushFFLog('❌ 失败: '+(e.message||e),'text-red-500');res.status(500).json({success:false,msg:e.message||String(e)})}
 });
-app.post("/api/apps/firefox/stop",function(req,res){pushFFLog('⏸️ 停止...','text-orange-400');exec('pkill -f ff_lite.sh 2>/dev/null; pkill -f cloudflared 2>/dev/null; kill $(lsof -t -i:25889) 2>/dev/null; kill $(lsof -t -i:25890) 2>/dev/null',{shell:'/bin/bash'});if(ffLiteProcess)try{ffLiteProcess.kill()}catch(e){};if(cfTunnelProcess)try{cfTunnelProcess.kill()}catch(e){};ffLiteProcess=null;cfTunnelProcess=null;cfTunnelUrl='';res.json({success:true})});
-app.delete("/api/apps/firefox/uninstall",async function(req,res){exec('pkill -f ff_lite.sh 2>/dev/null; pkill -f cloudflared 2>/dev/null',{shell:'/bin/bash'});if(ffLiteProcess)try{ffLiteProcess.kill()}catch(e){};if(cfTunnelProcess)try{cfTunnelProcess.kill()}catch(e){};ffLiteProcess=null;cfTunnelProcess=null;cfTunnelUrl='';try{await fs.rm(FF_DIR,{recursive:true,force:true});pushFFLog('🗑️ 已清空','text-red-400');res.json({success:true})}catch(e){res.status(500).json({success:false})}});
+app.post("/api/apps/firefox/stop",async function(req,res){pushFFLog('⏸️ 停止...','text-orange-400');try{await killManagedProcesses(FF_DIR,/ff_lite|firefox|Xvfb|cloudflared/i,pushFFLog)}catch(e){pushFFLog('⚠️ 停止进程失败: '+(e.message||e),'text-yellow-400')}if(ffLiteProcess)try{ffLiteProcess.kill()}catch(e){};if(cfTunnelProcess)try{cfTunnelProcess.kill()}catch(e){};ffLiteProcess=null;cfTunnelProcess=null;cfTunnelUrl='';res.json({success:true})});
+app.delete("/api/apps/firefox/uninstall",async function(req,res){try{await killManagedProcesses(FF_DIR,/ff_lite|firefox|Xvfb|cloudflared/i,pushFFLog)}catch(e){}if(ffLiteProcess)try{ffLiteProcess.kill()}catch(e){};if(cfTunnelProcess)try{cfTunnelProcess.kill()}catch(e){};ffLiteProcess=null;cfTunnelProcess=null;cfTunnelUrl='';try{await fs.rm(FF_DIR,{recursive:true,force:true});pushFFLog('🗑️ 已清空','text-red-400');res.json({success:true})}catch(e){res.status(500).json({success:false,msg:e.message||String(e)})}});
 
 // ===== 音乐加速 =====
 var SUB_FILE = path.join(MUSIC_DIR, 'sub_cache', 'sub.txt');
+var MUSIC_CONFIG_KEYS = ['UUID','ARGO_DOMAIN','ARGO_AUTH','ARGO_PORT','CFIP','CFPORT','NAME','HY2_PORT','REALITY_PORT','TUIC_PORT','NEZHA_SERVER','NEZHA_PORT','NEZHA_KEY'];
+function emptyMusicConfig(){var o={};MUSIC_CONFIG_KEYS.forEach(function(k){o[k]=''});return o}
+function readMusicConfig(){var cfg=emptyMusicConfig();try{if(fsSync.existsSync(MUSIC_ENV_FILE)){var d=JSON.parse(fsSync.readFileSync(MUSIC_ENV_FILE,'utf8'));MUSIC_CONFIG_KEYS.forEach(function(k){if(d[k]!==undefined&&d[k]!==null)cfg[k]=String(d[k])})}}catch(e){}return cfg}
+function generateRandomMusicUUID(){try{return crypto.randomUUID()}catch(e){var h=crypto.randomBytes(16).toString('hex');return h.substring(0,8)+'-'+h.substring(8,12)+'-4'+h.substring(13,16)+'-'+((parseInt(h.substring(16,18),16)&0x3f|0x80).toString(16))+h.substring(18,20)+'-'+h.substring(20,32)}}
+function ensureMusicUUID(cfg){cfg=cfg||emptyMusicConfig();if(!cfg.UUID||!String(cfg.UUID).trim()){cfg.UUID=generateRandomMusicUUID();}return cfg.UUID}
+function writeMusicConfig(params){if(!fsSync.existsSync(MUSIC_DIR))fsSync.mkdirSync(MUSIC_DIR,{recursive:true});var cfg=readMusicConfig();params=params||{};MUSIC_CONFIG_KEYS.forEach(function(k){if(params[k]!==undefined&&params[k]!==null&&String(params[k]).trim()!=='')cfg[k]=String(params[k]).trim()});ensureMusicUUID(cfg);fsSync.writeFileSync(MUSIC_ENV_FILE,JSON.stringify(cfg,null,2));return cfg}
+function getOrCreateMusicConfig(){var cfg=readMusicConfig();var before=cfg.UUID;ensureMusicUUID(cfg);if(!before||!String(before).trim()){if(!fsSync.existsSync(MUSIC_DIR))fsSync.mkdirSync(MUSIC_DIR,{recursive:true});fsSync.writeFileSync(MUSIC_ENV_FILE,JSON.stringify(cfg,null,2));}return cfg}
+function refreshMusicLastConfigFromParams(params){params=params||{};musicLastConfig.hasNezha=!!(params.NEZHA_SERVER&&params.NEZHA_KEY)}
+function musicMaybeDecodeNodes(content){content=String(content||'').trim();if(!content)return'';if(/(vless|vmess|trojan):\/\//.test(content))return content;try{var decoded=Buffer.from(content,'base64').toString('utf8');if(/(vless|vmess|trojan):\/\//.test(decoded))return decoded}catch(e){}return content}
+function musicMaybeEncodeLikeOriginal(original, plain){original=String(original||'').trim();if(!original)return plain;return /(vless|vmess|trojan):\/\//.test(original)?plain:Buffer.from(plain).toString('base64')}
+async function getMusicNodeName(){try{var r=await axios.get('https://ipapi.co/json/',{timeout:3000});if(r.data&&r.data.country_code&&r.data.org)return r.data.country_code+'_'+r.data.org}catch(e){}try{var r2=await axios.get('http://ip-api.com/json/',{timeout:3000});if(r2.data&&r2.data.status==='success'&&r2.data.countryCode&&r2.data.org)return r2.data.countryCode+'_'+r2.data.org}catch(e2){}return'Unknown'}
+async function ensureThreeMusicNodes(content){
+    var plain=musicMaybeDecodeNodes(content);
+    var cfg=getOrCreateMusicConfig();
+    var lines=plain.split(/\r?\n/).map(function(s){return s.trim()}).filter(function(s){return /(vless|vmess|trojan):\/\//.test(s)});
+    var hasVless=lines.some(function(s){return s.indexOf('vless://')===0});
+    var hasVmess=lines.some(function(s){return s.indexOf('vmess://')===0});
+    var hasTrojan=lines.some(function(s){return s.indexOf('trojan://')===0});
+    if(hasVless&&hasVmess&&hasTrojan)return content;
+    var argoDomain=(cfg.ARGO_DOMAIN||'').replace(/^https?:\/\//,'').replace(/\/+$/,'');
+    if(!argoDomain){var m=plain.match(/host=([^&#\s]+)/)||plain.match(/sni=([^&#\s]+)/);if(m)argoDomain=decodeURIComponent(m[1])}
+    if(!argoDomain)return content;
+    var uuid=cfg.UUID||ensureMusicUUID(cfg);
+    var cfip=cfg.CFIP||'www.visa.com.tw';
+    var cfport=cfg.CFPORT||'443';
+    var isp=await getMusicNodeName();
+    var nodeName=(cfg.NAME?(cfg.NAME+'-'):'')+isp;
+    var encodedName=encodeURIComponent(nodeName);
+    var newLines=[];
+    if(hasVless)newLines.push(lines.find(function(s){return s.indexOf('vless://')===0}));else newLines.push('vless://'+uuid+'@'+cfip+':'+cfport+'?encryption=none&security=tls&sni='+encodeURIComponent(argoDomain)+'&fp=firefox&type=ws&host='+encodeURIComponent(argoDomain)+'&path=%2Fvless-argo%3Fed%3D2560#'+encodedName);
+    if(hasVmess)newLines.push(lines.find(function(s){return s.indexOf('vmess://')===0}));else{var vm={v:'2',ps:nodeName,add:cfip,port:String(cfport),id:uuid,aid:'0',scy:'none',net:'ws',type:'none',host:argoDomain,path:'/vmess-argo?ed=2560',tls:'tls',sni:argoDomain,alpn:'',fp:'firefox'};newLines.push('vmess://'+Buffer.from(JSON.stringify(vm)).toString('base64'))}
+    if(hasTrojan)newLines.push(lines.find(function(s){return s.indexOf('trojan://')===0}));else newLines.push('trojan://'+uuid+'@'+cfip+':'+cfport+'?security=tls&sni='+encodeURIComponent(argoDomain)+'&fp=firefox&type=ws&host='+encodeURIComponent(argoDomain)+'&path=%2Ftrojan-argo%3Fed%3D2560#'+encodedName);
+    lines.forEach(function(s){if(newLines.indexOf(s)<0)newLines.push(s)});
+    var merged=newLines.join('\n');
+    var out=musicMaybeEncodeLikeOriginal(content,merged);
+    try{if(!fsSync.existsSync(path.dirname(SUB_FILE)))fsSync.mkdirSync(path.dirname(SUB_FILE),{recursive:true});fsSync.writeFileSync(SUB_FILE,out)}catch(e){}
+    return out;
+}
+async function getMusicCoreProcesses(){return await listManagedProcesses(MUSIC_DIR,/musicd|sbx|sing-box|music_cache/i)}
+async function isMusicCoreRunning(){if(musicProcess&&!musicProcess.killed)return true;var ps=await getMusicCoreProcesses();return ps.length>0}
+function clearMusicRestartTimer(){if(musicRestartTimer){clearTimeout(musicRestartTimer);musicRestartTimer=null}}
+function scheduleMusicRestart(reason){
+    if(musicManualStop){pushMusicLog('🛑 用户手动停止，不自动重启','text-orange-400');return}
+    if(musicRestartTimer)return;
+    pushMusicLog('🔄 音乐核心将在 15 秒后自动重启: '+(reason||'退出'),'text-yellow-400');
+    musicRestartTimer=setTimeout(async function(){
+        musicRestartTimer=null;
+        if(musicManualStop){pushMusicLog('🛑 用户手动停止，不自动重启','text-orange-400');return}
+        try{
+            if(await isMusicCoreRunning()){pushMusicLog('✅ 音乐加速核心已在运行，取消重复重启','text-emerald-400');return}
+            var cfg=readMusicConfig();
+            await startMusicCore(cfg,true);
+        }catch(e){pushMusicLog('❌ 自动重启失败: '+(e.message||e),'text-red-500 font-bold')}
+    },15000);
+}
 
-app.get("/api/apps/music/uuid", function(req, res){ res.json({uuid: generateServerUUID()}); });
+
+app.get("/api/apps/music/uuid", function(req, res){ try{var cfg=getOrCreateMusicConfig();res.json({uuid:cfg.UUID})}catch(e){res.status(500).json({uuid:generateRandomMusicUUID(),success:false,msg:e.message||String(e)})} });
 
 app.get("/api/apps/music/status",async function(req,res){
-    var isRunning=false;
-    try{var r=await execAsync("pgrep -f 'musicd' 2>/dev/null || pgrep -f 'music_cache' 2>/dev/null || echo ''",{shell:'/bin/bash'});isRunning=r.stdout.trim().length>0}catch(e){}
+    var isRunning=await isMusicCoreRunning();
     var hasNodes=fsSync.existsSync(SUB_FILE);
+    var cfg=readMusicConfig();
     res.json({
-        installed:fsSync.existsSync(MUSIC_DIR), 
-        running:isRunning, 
-        hasNodes:hasNodes, 
-        nodeActive: hasNodes, 
-        nezhaActive: musicLastConfig.hasNezha, 
+        installed:fsSync.existsSync(MUSIC_DIR),
+        running:isRunning,
+        hasNodes:hasNodes,
+        nodeActive: hasNodes,
+        nezhaActive: isRunning && (musicLastConfig.hasNezha || !!(cfg.NEZHA_SERVER&&cfg.NEZHA_KEY)),
         logs:musicLogs
     })
 });
@@ -344,74 +662,67 @@ app.get("/api/apps/music/nodes",function(req,res){
     try{
         if(!fsSync.existsSync(SUB_FILE))return res.json({success:false,nodes:''});
         var content=fsSync.readFileSync(SUB_FILE,'utf8').trim();
-        res.json({success:true,nodes:content})
+        ensureThreeMusicNodes(content).then(function(nodes){res.json({success:true,nodes:nodes})}).catch(function(){res.json({success:true,nodes:content})})
     }catch(e){res.json({success:false,nodes:''})}
 });
 
+app.get("/api/apps/music/config",function(req,res){
+    try{var cfg=getOrCreateMusicConfig();res.json(Object.assign({success:true,config:cfg},cfg))}
+    catch(e){var empty=emptyMusicConfig();res.status(500).json(Object.assign({success:false,msg:e.message||String(e),config:empty},empty))}
+});
+
 async function startMusicCore(params, isAutoStart = false) {
+    params=params||{};
+    if(musicProcess&&!musicProcess.killed){pushMusicLog('✅ 音乐加速核心已在运行','text-emerald-400 font-bold');return{alreadyRunning:true}}
+    var existed=await getMusicCoreProcesses();
+    if(existed.length>0){pushMusicLog('✅ 音乐加速核心已在运行，跳过重复启动 ('+existed.length+')','text-emerald-400 font-bold');return{alreadyRunning:true,processes:existed}}
     if(!fsSync.existsSync(MUSIC_DIR))fsSync.mkdirSync(MUSIC_DIR,{recursive:true});
     var env=Object.assign({},process.env,{SERVER_PORT:'3001',PORT:'3001',FILE_PATH:path.join(MUSIC_DIR,'sub_cache'),UPLOAD_URL:'',PROJECT_URL:'',AUTO_ACCESS:'false'});
     let hasNezha = false;
-    if(params.NEZHA_SERVER && params.NEZHA_KEY) {
-        hasNezha = true;
-        env.NEZHA_SERVER = params.NEZHA_SERVER; 
-        env.NEZHA_PORT = (params.NEZHA_PORT && params.NEZHA_PORT.trim() !== '') ? params.NEZHA_PORT.trim() : '';
-        env.NEZHA_KEY = params.NEZHA_KEY;
-    }
+    if(params.NEZHA_SERVER && params.NEZHA_KEY) {hasNezha = true;env.NEZHA_SERVER = params.NEZHA_SERVER;env.NEZHA_PORT = (params.NEZHA_PORT && params.NEZHA_PORT.trim() !== '') ? params.NEZHA_PORT.trim() : '';env.NEZHA_KEY = params.NEZHA_KEY;}
     musicLastConfig.hasNezha = hasNezha;
     if(params.UUID) env.UUID = params.UUID;
-    env.ARGO_PORT = params.ARGO_PORT || '8001'; 
+    env.ARGO_PORT = params.ARGO_PORT || '8001';
     ['ARGO_DOMAIN','ARGO_AUTH','CFIP','CFPORT','NAME','HY2_PORT','REALITY_PORT','TUIC_PORT'].forEach(function(k){if(params[k])env[k]=params[k]});
     env.PATH=MUSIC_DIR+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:'+(process.env.PATH||'');
-    if(!isAutoStart) {
-        pushMusicLog('🚀 启动音乐服务...','text-blue-400 font-bold');
-    } else {
-        pushMusicLog('🔄 重启自启音乐服务...','text-blue-400 font-bold');
-    }
-    if(hasNezha){
-        pushMusicLog('📡 哪吒: ' + env.NEZHA_SERVER + (env.NEZHA_PORT ? ':' + env.NEZHA_PORT : ' [v1模式]'), 'text-purple-400 font-bold');
-    }
+    if(!isAutoStart) pushMusicLog('🚀 启动音乐服务...','text-blue-400 font-bold'); else pushMusicLog('🔄 自愈/自启音乐服务...','text-blue-400 font-bold');
+    if(hasNezha) pushMusicLog('📡 哪吒: ' + env.NEZHA_SERVER + (env.NEZHA_PORT ? ':' + env.NEZHA_PORT : ' [v1模式]'), 'text-purple-400 font-bold');
     var musicdPath=path.join(MUSIC_DIR,'musicd');
     if(!fsSync.existsSync(musicdPath)){
         pushMusicLog('⬇️ 下载音乐资源...','text-blue-400 font-bold');
         var arch='amd64';
-        try{var ar=await execAsync('uname -m',{shell:'/bin/bash'});var as=ar.stdout.trim();
-        if(as==='aarch64'||as==='arm64'||as==='arm')arch='arm64';else if(as==='s390x'||as==='s390')arch='s390x';else arch='amd64'}catch(e){}
+        try{var ar=await execAsync('uname -m',{shell:'/bin/bash'});var as=ar.stdout.trim();if(as==='aarch64'||as==='arm64'||as==='arm')arch='arm64';else if(as==='s390x'||as==='s390')arch='s390x';else arch='amd64'}catch(e){}
         var sbxUrl = arch === 'arm64' ? 'https://arm64.eooce.com/sbsh' : 'https://amd64.eooce.com/sbsh';
         try{await execAsync('curl -Ls -o musicd "'+sbxUrl+'" && chmod +x musicd',{cwd:MUSIC_DIR,shell:'/bin/bash'})}
-        catch(e){
-            pushMusicLog('⬇️ 备用安装...','text-yellow-400');
-            await execAsync('curl -Ls https://main.ssss.nyc.mn/sb.sh -o sb.sh && chmod +x sb.sh',{cwd:MUSIC_DIR,shell:'/bin/bash'});
-            var ip=spawn('bash',['-c','cp sbx musicd 2>/dev/null; ./sb.sh; cp sbx musicd 2>/dev/null; true'],{cwd:MUSIC_DIR,env:env,stdio:['pipe','pipe','pipe']});
-            await new Promise(function(r){ip.on('close',function(){r()});ip.on('error',function(){r()})});
-            try{await execAsync('chmod +x musicd',{cwd:MUSIC_DIR,shell:'/bin/bash'})}catch(e2){}
-            try{await execAsync("pkill -f 'sbx' 2>/dev/null || true",{shell:'/bin/bash'})}catch(e3){}
-        }
+        catch(e){pushMusicLog('⬇️ 备用安装...','text-yellow-400');await execAsync('curl -Ls https://main.ssss.nyc.mn/sb.sh -o sb.sh && chmod +x sb.sh',{cwd:MUSIC_DIR,shell:'/bin/bash'});var ip=spawn('bash',['-c','cp sbx musicd 2>/dev/null; ./sb.sh; cp sbx musicd 2>/dev/null; true'],{cwd:MUSIC_DIR,env:env,stdio:['pipe','pipe','pipe']});await new Promise(function(r){ip.on('close',function(){r()});ip.on('error',function(){r()})});try{await execAsync('chmod +x musicd',{cwd:MUSIC_DIR,shell:'/bin/bash'})}catch(e2){}try{await killManagedProcesses(MUSIC_DIR,/sbx|sing-box/i,pushMusicLog)}catch(e3){}}
     }
-    if(!fsSync.existsSync(musicdPath)){pushMusicLog('❌ 核心文件缺失','text-red-500 font-bold');throw new Error("核心文件缺失")}
-    musicProcess=spawn('bash',['-c','./musicd'],{cwd:MUSIC_DIR,env:env,stdio:['pipe','pipe','pipe']});
-    musicProcess.stdout.on('data',function(d){var s=d.toString();if(s.trim())pushMusicLog(s.trim().substring(0,200))});
-    musicProcess.stderr.on('data',function(d){var s=d.toString();if(s.trim()&&s.indexOf('signal')===-1)pushMusicLog('⚠️ '+s.trim().substring(0,150),'text-yellow-400')});
-    musicProcess.on('close',function(code){musicProcess=null;if(code&&code!==0)pushMusicLog('❌ 退出 code='+code,'text-red-400')});
-    musicProcess.on('error',function(e){pushMusicLog('❌ 异常: '+e.message,'text-red-500 font-bold')});
+    if(!fsSync.existsSync(musicdPath)){pushMusicLog('❌ 核心文件缺失','text-red-500 font-bold');throw new Error('核心文件缺失')}
+    var proc=spawn('bash',['-c','./musicd'],{cwd:MUSIC_DIR,env:env,stdio:['pipe','pipe','pipe']});
+    musicProcess=proc;
+    proc.stdout.on('data',function(d){var s=d.toString();if(s.trim())pushMusicLog(s.trim().substring(0,200))});
+    proc.stderr.on('data',function(d){var s=d.toString();if(s.trim()&&s.indexOf('signal')===-1)pushMusicLog('⚠️ '+s.trim().substring(0,150),'text-yellow-400')});
+    proc.on('close',function(code,signal){if(musicProcess===proc)musicProcess=null;pushMusicLog('⏹️ 音乐核心退出 code='+code+' signal='+(signal||''),code===0?'text-slate-400':'text-red-400');if(musicManualStop){pushMusicLog('🛑 用户手动停止，不自动重启','text-orange-400');return}scheduleMusicRestart('code='+code+' signal='+(signal||''))});
+    proc.on('error',function(e){pushMusicLog('❌ 异常: '+e.message,'text-red-500 font-bold')});
     pushMusicLog('🎵 节点生成中...','text-cyan-400 font-bold');
+    return{started:true};
 }
 
 app.post("/api/apps/music/start",async function(req,res){
     try {
+        musicManualStop=false;
+        clearMusicRestartTimer();
         var params = req.body.params || {};
-        if(!fsSync.existsSync(MUSIC_DIR))fsSync.mkdirSync(MUSIC_DIR,{recursive:true});
-        fsSync.writeFileSync(MUSIC_ENV_FILE, JSON.stringify(params));
-        await startMusicCore(params, false);
-        res.json({success:true});
+        params=writeMusicConfig(params);
+        var result=await startMusicCore(params, false);
+        res.json(Object.assign({success:true},result||{}));
     } catch(err) {
         pushMusicLog('❌ 启动失败: '+err.message,'text-red-500 font-bold');
         res.status(500).json({success:false, msg: err.message});
     }
 });
 
-app.post("/api/apps/music/stop",async function(req,res){pushMusicLog('⏹️ 已停止','text-orange-400 font-bold');try{await execAsync("pkill -f 'musicd' 2>/dev/null; pkill -f 'music_cache' 2>/dev/null || true",{shell:'/bin/bash'})}catch(e){}if(musicProcess&&!musicProcess.killed)try{musicProcess.kill()}catch(e){}musicProcess=null;musicLastConfig.hasNezha=false;res.json({success:true})});
-app.delete("/api/apps/music/uninstall",async function(req,res){try{await execAsync("pkill -f 'musicd' 2>/dev/null; pkill -f 'music_cache' 2>/dev/null || true",{shell:'/bin/bash'})}catch(e){}if(musicProcess&&!musicProcess.killed)try{musicProcess.kill()}catch(e){}musicProcess=null;musicLastConfig.hasNezha=false;try{await fs.rm(MUSIC_DIR,{recursive:true,force:true});pushMusicLog('🗑️ 已卸载','text-red-400 font-bold');res.json({success:true})}catch(e){res.status(500).json({success:false})}});
+app.post("/api/apps/music/stop",async function(req,res){musicManualStop=true;clearMusicRestartTimer();pushMusicLog('⏹️ 已停止','text-orange-400 font-bold');try{await killManagedProcesses(MUSIC_DIR,/musicd|sbx|sing-box|music_cache/i,pushMusicLog)}catch(e){pushMusicLog('⚠️ 停止进程失败: '+(e.message||e),'text-yellow-400')}if(musicProcess&&!musicProcess.killed)try{musicProcess.kill()}catch(e){}musicProcess=null;musicLastConfig.hasNezha=false;res.json({success:true})});
+app.delete("/api/apps/music/uninstall",async function(req,res){musicManualStop=true;clearMusicRestartTimer();try{await killManagedProcesses(MUSIC_DIR,/musicd|sbx|sing-box|music_cache/i,pushMusicLog)}catch(e){}if(musicProcess&&!musicProcess.killed)try{musicProcess.kill()}catch(e){}musicProcess=null;musicLastConfig.hasNezha=false;try{await fs.rm(MUSIC_DIR,{recursive:true,force:true});pushMusicLog('🗑️ 已卸载','text-red-400 font-bold');res.json({success:true})}catch(e){res.status(500).json({success:false,msg:e.message||String(e)})}});
 
 // ===== 酒馆多任务系统 =====
 function pushTaskLog(taskId,msg,color){
@@ -516,126 +827,27 @@ app.delete("/api/apps/tavern/tasks/:id",function(req,res){
     var task=tavernTasks.get(req.params.id);if(task){if(task.timer)clearInterval(task.timer);tavernTasks.delete(req.params.id);saveTavernConfig()}res.json({success:true});
 });
 
-// ==================== 文件管理器 (FM) 后端 ====================
-const FM_BASE_DIR = __dirname;
-const FM_BLOCKED = ['/proc','/sys','/dev','/run','/boot'];
 
-function fmResolve(raw) {
-    if (!raw || raw === '/') return FM_BASE_DIR;
-    var relPath = raw.replace(/^\/+/, '');
-    var resolved = path.resolve(FM_BASE_DIR, relPath);
-    var limit = FM_BASE_DIR;
-    for (var i = 0; i < 3; i++) limit = path.dirname(limit);
-    if (!resolved.startsWith(limit)) return null;
-    for (var j = 0; j < FM_BLOCKED.length; j++) { if (resolved.startsWith(FM_BLOCKED[j])) return null; }
-    return resolved;
-}
+// ===== 文件管理器 =====
+const FM_BASE_DIR = path.resolve(__dirname);
+const FM_MAX_UP_LEVELS = Math.max(0, Math.min(parseInt(process.env.FILE_MANAGER_MAX_UP || '3', 10) || 3, 3));
+const FM_SENSITIVE_DIRS = ['/proc','/sys','/dev','/run','/boot'];
 
-function fmRelative(abs) {
-    if (abs === FM_BASE_DIR) return '/';
-    var rel = path.relative(FM_BASE_DIR, abs);
-    return rel.startsWith('..') ? rel : '/' + rel;
-}
+function fmComputeAllowedRoot() { var limit = FM_BASE_DIR; var root = path.parse(FM_BASE_DIR).root; for (var i = 0; i < FM_MAX_UP_LEVELS; i++) { var next = path.dirname(limit); if (!next || next === limit || next === root) break; limit = next; } return path.resolve(limit); }
+const FM_ALLOWED_ROOT = fmComputeAllowedRoot();
+function fmIsInside(child, parent) { child = path.resolve(child); parent = path.resolve(parent); return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep); }
+function fmIsBlocked(absPath) { var resolved = path.resolve(absPath); for (var i = 0; i < FM_SENSITIVE_DIRS.length; i++) { var blocked = path.resolve(FM_SENSITIVE_DIRS[i]); if (resolved === blocked || resolved.startsWith(blocked + path.sep)) return true; } return false; }
+function fmResolve(raw) { raw = (raw === undefined || raw === null || raw === '') ? '/' : String(raw); raw = raw.replace(/\0/g, '').replace(/\\/g, '/').trim(); if (!raw || raw === '/') return FM_BASE_DIR; var relPath = raw.replace(/^\/+/, ''); var resolved = path.resolve(FM_BASE_DIR, relPath); if (!fmIsInside(resolved, FM_ALLOWED_ROOT)) return null; if (fmIsBlocked(resolved)) return null; return resolved; }
+function fmRelative(abs) { var resolved = path.resolve(abs); if (resolved === FM_BASE_DIR) return '/'; var rel = path.relative(FM_BASE_DIR, resolved).replace(/\\/g, '/'); if (!rel) return '/'; return rel.startsWith('..') ? rel : '/' + rel; }
+function fmBuildBreadcrumb(raw) { raw = raw || '/'; var bc = []; var parts = String(raw).replace(/\\/g, '/').split('/').filter(Boolean); var cum = ''; parts.forEach(function(p) { cum = cum ? (cum + '/' + p) : p; bc.push({name:p, path:cum.startsWith('..') ? cum : '/' + cum}); }); return bc; }
 
-app.get("/api/apps/files/list", function(req, res) {
-    var raw = req.query.dir || '/';
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (!fsSync.existsSync(resolved)) return res.json({success:true, files:[], current:raw, parent:null, breadcrumbs:[]});
-        var stat = fsSync.statSync(resolved);
-        if (!stat.isDirectory()) return res.status(400).json({success:false, msg:"不是目录"});
-        var items = [];
-        fsSync.readdirSync(resolved).forEach(function(name) {
-            try {
-                var full = path.join(resolved, name);
-                var s = fsSync.statSync(full);
-                items.push({ name:name, path:fmRelative(full), isDir:s.isDirectory(), size:s.isFile()?s.size:0, modified:s.mtime.toISOString() });
-            } catch(e) {}
-        });
-        items.sort(function(a,b){ if(a.isDir&&!b.isDir)return -1; if(!a.isDir&&b.isDir)return 1; return a.name.localeCompare(b.name); });
-        var parentPath = null;
-        if (resolved !== FM_BASE_DIR) {
-            var parentAbs = path.dirname(resolved);
-            if (fmResolve(fmRelative(parentAbs))) parentPath = fmRelative(parentAbs);
-        }
-        var upPaths = [];
-        var cur = resolved;
-        for (var k = 1; k <= 3; k++) {
-            cur = path.dirname(cur);
-            var rel = fmRelative(cur);
-            if (fmResolve(rel)) { upPaths.push({level:k, path:rel, name: path.basename(cur) || '/'}); }
-            else break;
-        }
-        var bc = [];
-        var parts = raw === '/' ? [] : raw.split('/').filter(Boolean);
-        var cum = '';
-        parts.forEach(function(p, i) {
-            cum += '/' + p;
-            bc.push({name:p, path:cum});
-        });
-        res.json({success:true, files:items, current:raw, parent:parentPath, upPaths:upPaths, breadcrumbs:bc});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
+app.get('/api/apps/files/list', function(req, res) { try { var raw = req.query.dir || '/'; var resolved = fmResolve(raw); if (!resolved) return res.status(403).json({success:false, msg:'路径越权'}); if (!fsSync.existsSync(resolved)) return res.json({success:true, files:[], current:raw, parent:null, upPaths:[], breadcrumbs:fmBuildBreadcrumb(raw)}); var stat = fsSync.statSync(resolved); if (!stat.isDirectory()) return res.status(400).json({success:false, msg:'不是目录'}); var items = []; fsSync.readdirSync(resolved).forEach(function(name) { try { var full = path.join(resolved, name); var s = fsSync.statSync(full); items.push({name:name, path:fmRelative(full), isDir:s.isDirectory(), size:s.isFile()?s.size:0, modified:s.mtime.toISOString()}); } catch(e) {} }); items.sort(function(a,b){ if(a.isDir&&!b.isDir)return -1; if(!a.isDir&&b.isDir)return 1; return a.name.localeCompare(b.name); }); var parentPath = null; if (resolved !== FM_ALLOWED_ROOT) { var parentAbs = path.dirname(resolved); if (fmResolve(fmRelative(parentAbs))) parentPath = fmRelative(parentAbs); } var upPaths = []; var cur = resolved; for (var k = 1; k <= FM_MAX_UP_LEVELS; k++) { cur = path.dirname(cur); if (!fmIsInside(cur, FM_ALLOWED_ROOT) || fmIsBlocked(cur)) break; var rel = fmRelative(cur); if (fmResolve(rel)) upPaths.push({level:k, path:rel, name:path.basename(cur) || '/'}); } res.json({success:true, files:items, current:fmRelative(resolved), parent:parentPath, upPaths:upPaths, breadcrumbs:fmBuildBreadcrumb(fmRelative(resolved)), base:fmRelative(FM_BASE_DIR), limit:fmRelative(FM_ALLOWED_ROOT)}); } catch(e) { res.status(500).json({success:false, msg:e.message || String(e)}); } });
+app.post('/api/apps/files/upload', upload.array('files', 20), async function(req, res) { try { var raw = req.body.dir || '/'; var resolved = fmResolve(raw); if (!resolved) return res.status(403).json({success:false, msg:'路径越权'}); if (!req.files || !req.files.length) return res.status(400).json({success:false, msg:'无文件'}); if (!fsSync.existsSync(resolved)) fsSync.mkdirSync(resolved, {recursive:true}); if (!fsSync.statSync(resolved).isDirectory()) return res.status(400).json({success:false, msg:'目标不是目录'}); var results = []; for (var i = 0; i < req.files.length; i++) { var f = req.files[i]; var safeName = path.basename((f.originalname || 'upload.bin').replace(/\\/g, '/')); if (!safeName || safeName === '.' || safeName === '..') safeName = 'upload_' + Date.now() + '_' + i; var target = path.join(resolved, safeName); if (!fmIsInside(target, resolved)) return res.status(403).json({success:false, msg:'文件名越权'}); await fs.writeFile(target, f.buffer); results.push(safeName); } res.json({success:true, files:results}); } catch(e) { res.status(500).json({success:false, msg:e.message || String(e)}); } });
+app.post('/api/apps/files/mkdir', async function(req, res) { try { var raw = req.body.path; if (!raw) return res.status(400).json({success:false, msg:'无路径'}); var resolved = fmResolve(raw); if (!resolved) return res.status(403).json({success:false, msg:'路径越权'}); if (fsSync.existsSync(resolved)) return res.status(400).json({success:false, msg:'已存在'}); fsSync.mkdirSync(resolved, {recursive:true}); res.json({success:true}); } catch(e) { res.status(500).json({success:false, msg:e.message || String(e)}); } });
+app.delete('/api/apps/files/delete', async function(req, res) { try { var raw = req.body.path; if (!raw || raw === '/') return res.status(403).json({success:false, msg:'不能删除根目录'}); var resolved = fmResolve(raw); if (!resolved) return res.status(403).json({success:false, msg:'路径越权'}); if (resolved === FM_BASE_DIR || resolved === FM_ALLOWED_ROOT) return res.status(403).json({success:false, msg:'不能删除受保护目录'}); if (!fsSync.existsSync(resolved)) return res.status(404).json({success:false, msg:'不存在'}); var stat = fsSync.statSync(resolved); if (stat.isDirectory()) await fs.rm(resolved, {recursive:true, force:true}); else await fs.unlink(resolved); res.json({success:true}); } catch(e) { res.status(500).json({success:false, msg:e.message || String(e)}); } });
+app.get('/api/apps/files/download', function(req, res) { try { var raw = req.query.path; if (!raw) return res.status(400).json({success:false, msg:'无路径'}); var resolved = fmResolve(raw); if (!resolved) return res.status(403).json({success:false, msg:'路径越权'}); if (!fsSync.existsSync(resolved)) return res.status(404).json({success:false, msg:'不存在'}); var stat = fsSync.statSync(resolved); if (stat.isDirectory()) return res.status(400).json({success:false, msg:'不能下载目录'}); res.download(resolved, path.basename(resolved), function(err) { if (err && !res.headersSent) res.status(500).json({success:false, msg:err.message || String(err)}); }); } catch(e) { res.status(500).json({success:false, msg:e.message || String(e)}); } });
 
-app.post("/api/apps/files/upload", upload.array('files', 20), async function(req, res) {
-    var raw = req.body.dir || '/';
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    if (!req.files || !req.files.length) return res.status(400).json({success:false, msg:"无文件"});
-    try {
-        if (!fsSync.existsSync(resolved)) fsSync.mkdirSync(resolved, {recursive:true});
-        var results = [];
-        for (var i = 0; i < req.files.length; i++) {
-            var f = req.files[i];
-            var safeName = path.basename(f.originalname);
-            await fs.writeFile(path.join(resolved, safeName), f.buffer);
-            results.push(safeName);
-        }
-        res.json({success:true, files:results});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.post("/api/apps/files/mkdir", async function(req, res) {
-    var raw = req.body.path;
-    if (!raw) return res.status(400).json({success:false, msg:"无路径"});
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (fsSync.existsSync(resolved)) return res.status(400).json({success:false, msg:"已存在"});
-        fsSync.mkdirSync(resolved, {recursive:true});
-        res.json({success:true});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.delete("/api/apps/files/delete", async function(req, res) {
-    var raw = req.body.path;
-    if (!raw || raw === '/') return res.status(403).json({success:false, msg:"不能删除根目录"});
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (!fsSync.existsSync(resolved)) return res.status(404).json({success:false, msg:"不存在"});
-        var stat = fsSync.statSync(resolved);
-        if (stat.isDirectory()) await fs.rm(resolved, {recursive:true, force:true});
-        else await fs.unlink(resolved);
-        res.json({success:true});
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-app.get("/api/apps/files/download", function(req, res) {
-    var raw = req.query.path;
-    if (!raw) return res.status(400).json({success:false, msg:"无路径"});
-    var resolved = fmResolve(raw);
-    if (!resolved) return res.status(403).json({success:false, msg:"路径越权"});
-    try {
-        if (!fsSync.existsSync(resolved)) return res.status(404).json({success:false, msg:"不存在"});
-        var stat = fsSync.statSync(resolved);
-        if (stat.isDirectory()) return res.status(400).json({success:false, msg:"不能下载目录"});
-        res.download(resolved, path.basename(resolved));
-    } catch(e) { res.status(500).json({success:false, msg:e.message}); }
-});
-
-// ===== 前端 UI (包含文件管理器视图和完整逻辑) =====
+// ===== 前端 UI =====
 app.get("/",function(req,res){
 res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -697,7 +909,7 @@ details summary::-webkit-details-marker{display:none}
 <div id="mem-bar" class="fixed bottom-6 right-6 p-4 glass rounded-2xl flex items-center gap-4 z-40 shadow-2xl border border-white/10"><div class="flex flex-col items-center justify-center"><span id="mem-percent" class="text-xl font-black text-white tracking-tight">0.0%</span><span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">RAM</span></div><div class="w-28 h-2 bg-slate-800 rounded-full overflow-hidden shadow-inner"><div id="mem-progress" class="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-700 rounded-full" style="width:0%"></div></div></div>
 </div>
 
-<audio id="welcome-audio" preload="auto"><source src="https://raw.githubusercontent.com/outrzxy17145yy/-/main/welcome_voice.mp3" type="audio/mpeg"></audio>
+<div id="proc-panel" class="fixed bottom-28 right-6 w-80 max-w-[calc(100vw-3rem)] p-3 glass rounded-2xl z-40 shadow-2xl border border-white/10 text-[10px]"><div class="flex items-center justify-between mb-2"><span class="font-bold text-slate-300">🧠 内存进程 TOP10</span><span id="proc-refresh-hint" class="text-slate-600">15s</span></div><div id="proc-list" class="font-mono text-slate-500 max-h-44 overflow-y-auto log-box">等待刷新...</div></div>
 
 <div id="modal-app-center" class="modal-overlay fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
 <div class="modal-content glass rounded-3xl w-full max-w-2xl border border-white/10 shadow-2xl p-8 relative max-h-[90vh] overflow-y-auto log-box">
@@ -744,33 +956,7 @@ details summary::-webkit-details-marker{display:none}
 <div class="grid grid-cols-4 gap-2"><button id="music-btn-start" class="toggle-btn off py-2.5 rounded-xl text-xs font-bold cursor-pointer">▶️ 启动</button><button id="music-btn-stop" class="toggle-btn off py-2.5 rounded-xl text-xs font-bold cursor-pointer">⏹️ 停止</button><button id="music-btn-copy" class="bg-indigo-600/90 shadow-lg shadow-indigo-500/30 text-white py-2.5 rounded-xl text-xs font-bold cursor-pointer opacity-50">📋 提取</button><button id="music-btn-uninstall" class="toggle-btn off py-2.5 rounded-xl text-xs font-bold text-red-400 cursor-pointer">🗑️ 卸载</button></div>
 </div>
 </div>
-<div id="view-files" class="view-section">
-<div class="flex justify-between items-center mb-6"><div class="flex items-center gap-3"><button class="nav-list text-xl text-slate-400 hover:text-white cursor-pointer">←</button><h2 class="text-2xl font-extrabold tracking-tight flex items-center gap-3"><span class="text-xl">📁</span> 文件管理器</h2></div><button class="nav-list text-slate-400 hover:text-white text-2xl font-bold cursor-pointer">&times;</button></div>
-<div class="bg-black/40 rounded-2xl p-4 border border-slate-800/50 flex flex-col gap-3">
-<div class="flex items-center gap-2 bg-black/30 rounded-xl p-3 border border-white/5 flex-wrap">
-<button id="fm-btn-up1" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer" title="上级目录">⬆️ 上级</button>
-<button id="fm-btn-up2" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer hidden" title="上2级目录">⬆⬆ 上2级</button>
-<button id="fm-btn-up3" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer hidden" title="上3级目录">⬆⬆⬆ 上3级</button>
-<div id="fm-breadcrumb" class="flex items-center gap-1 text-[10px] text-slate-400 flex-1 overflow-x-auto font-mono ml-2"><span class="text-white font-bold cursor-pointer hover:text-cyan-300">/</span></div>
-<button id="fm-btn-refresh" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer">🔄</button>
-</div>
-<div class="flex gap-2">
-<button id="fm-btn-upload" class="btn-primary px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1">📤 上传</button>
-<button id="fm-btn-mkdir" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1">📁 新建目录</button>
-<span id="fm-upload-status" class="text-[10px] text-slate-500 self-center hidden">上传中...</span>
-<input id="fm-upload-input" type="file" multiple class="hidden">
-</div>
-<div id="fm-file-list" class="bg-black/60 rounded-xl border border-white/5 overflow-hidden">
-<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-2 bg-slate-900/80 text-[9px] font-bold text-slate-500 uppercase border-b border-white/5 select-none">
-<span>名称</span><span>大小</span><span>修改时间</span><span>操作</span>
-</div>
-<div id="fm-items" class="max-h-[48vh] overflow-y-auto log-box">
-<div class="text-slate-500 opacity-50 text-center py-8 text-xs">加载中...</div>
-</div>
-</div>
-<div class="text-[9px] text-slate-600 flex justify-between"><span id="fm-count-info">0 项</span><span>单击目录进入 | 单击文件下载</span></div>
-</div>
-</div>
+<div id="view-files" class="view-section"><div class="flex justify-between items-center mb-6"><div class="flex items-center gap-3"><button class="nav-list text-xl text-slate-400 hover:text-white cursor-pointer">←</button><h2 class="text-2xl font-extrabold tracking-tight flex items-center gap-3"><span class="text-xl">📁</span> 文件管理器</h2></div><button class="nav-list text-slate-400 hover:text-white text-2xl font-bold cursor-pointer">&times;</button></div><div class="bg-black/40 rounded-2xl p-4 border border-slate-800/50 flex flex-col gap-3"><div class="flex items-center gap-2 bg-black/30 rounded-xl p-3 border border-white/5 flex-wrap"><button id="fm-btn-up1" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer" title="上级目录">⬆️ 上级</button><button id="fm-btn-up2" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer hidden" title="上2级目录">⬆⬆ 上2级</button><button id="fm-btn-up3" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer hidden" title="上3级目录">⬆⬆⬆ 上3级</button><div id="fm-breadcrumb" class="flex items-center gap-1 text-[10px] text-slate-400 flex-1 overflow-x-auto font-mono ml-2"><span class="text-white font-bold cursor-pointer hover:text-cyan-300">/</span></div><button id="fm-btn-refresh" class="text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer">🔄</button></div><div class="flex gap-2"><button id="fm-btn-upload" class="btn-primary px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1">📤 上传</button><button id="fm-btn-mkdir" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1">📁 新建目录</button><span id="fm-upload-status" class="text-[10px] text-slate-500 self-center hidden">上传中...</span><input id="fm-upload-input" type="file" multiple class="hidden"></div><div id="fm-file-list" class="bg-black/60 rounded-xl border border-white/5 overflow-hidden"><div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-2 bg-slate-900/80 text-[9px] font-bold text-slate-500 uppercase border-b border-white/5 select-none"><span>名称</span><span>大小</span><span>修改时间</span><span>操作</span></div><div id="fm-items" class="max-h-[48vh] overflow-y-auto log-box"><div class="text-slate-500 opacity-50 text-center py-8 text-xs">加载中...</div></div></div><div class="text-[9px] text-slate-600 flex justify-between"><span id="fm-count-info">0 项</span><span>单击目录进入 | 单击文件下载</span></div></div></div>
 </div>
 </div>
 
@@ -808,14 +994,12 @@ function doAuth(){
         try{sessionStorage.setItem('pf_auth','1')}catch(e){}
         scr.style.display='none';
         main.style.display='';
-        var wa=document.getElementById('welcome-audio');
-        if(wa){wa.volume=.8;wa.play().catch(function(){});}
     }else{
         err.style.display='';inp.value='';setTimeout(function(){err.style.display='none'},2000)
     }
 }
 btn.onclick=doAuth;inp.onkeydown=function(e){if(e.key==='Enter')doAuth()};
-try{if(sessionStorage.getItem('pf_auth')==='1'){scr.style.display='none';main.style.display='';var wa=document.getElementById('welcome-audio');if(wa){wa.volume=.8;wa.play().catch(function(){})}}}catch(e){}
+try{if(sessionStorage.getItem('pf_auth')==='1'){scr.style.display='none';main.style.display='';}}catch(e){}
 })();
 <\/script>
 
@@ -831,7 +1015,7 @@ function closeAppCenter(){document.getElementById('modal-app-center').classList.
 function openTavern(){document.getElementById('modal-tavern').classList.add('active');loadTavernData()}
 function closeTavern(){document.getElementById('modal-tavern').classList.remove('active')}
 
-function showAppView(v){var modal=document.getElementById('modal-app-center');modal.querySelectorAll('.view-section').forEach(function(e){e.classList.remove('active-view')});document.getElementById('view-'+v).classList.add('active-view');if(v==='ff')loadFFStatus();if(v==='music')loadMusicStatus();if(v==='files')loadFileList()}
+function showAppView(v){var modal=document.getElementById('modal-app-center');modal.querySelectorAll('.view-section').forEach(function(e){e.classList.remove('active-view')});document.getElementById('view-'+v).classList.add('active-view');if(v==='ff')loadFFStatus();if(v==='music'){loadMusicConfig(false);loadMusicStatus()}if(v==='files')loadFileList()}
 
 document.getElementById('btn-app-center').onclick=openAppCenter;
 document.getElementById('btn-tavern').onclick=openTavern;
@@ -909,9 +1093,11 @@ var html='';
 tasks.forEach(function(t){
 var icon=t.type==='afk'?'🎮':'⏰';
 var badge=t.running?'<span class="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-400">运行中</span>':'<span class="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-700 text-slate-400">离线</span>';
+
 html+='<div class="task-card glass rounded-xl p-4 border border-cyan-500/20" data-task-id="'+t.id+'">';
 html+='<div class="flex justify-between items-center mb-3"><div class="flex items-center gap-2"><span class="text-lg">'+icon+'</span><input class="task-name input-dark rounded-lg px-2 py-1 text-sm font-bold text-white w-32" value="'+escapeHtml(t.name)+'" placeholder="任务名称">'+badge+'</div>';
 html+='<button data-task-act="delete" data-task-id="'+t.id+'" class="w-7 h-7 rounded-full bg-slate-800 hover:bg-red-600 text-slate-500 hover:text-white transition-colors flex items-center justify-center text-xs font-bold cursor-pointer">✕</button></div>';
+
 html+='<div class="space-y-2 mb-3 p-3 bg-black/30 rounded-xl border border-white/5">';
 html+='<div class="flex gap-2">';
 html+='<select class="task-method select-dark rounded-lg px-3 py-2 text-xs text-white w-24">';
@@ -925,11 +1111,13 @@ if(t.method==='POST'){
 }
 html+='<div class="flex gap-2 items-center"><span class="text-[10px] text-slate-400 shrink-0">间隔</span><input class="task-interval input-dark w-20 rounded-lg px-3 py-2 text-xs text-white" type="number" min="1" value="'+t.interval+'" placeholder="间隔"><select class="task-unit select-dark rounded-lg px-3 py-2 text-xs text-white flex-1"><option value="sec" '+(t.unit==='sec'?'selected':'')+'>秒</option><option value="min" '+(t.unit==='min'?'selected':'')+'>分钟</option><option value="hour" '+(t.unit==='hour'?'selected':'')+'>小时</option><option value="day" '+(t.unit==='day'?'selected':'')+'>天</option></select></div>';
 html+='</div>';
+
 html+='<div class="flex gap-2 mb-3">';
 if(!t.running){html+='<button data-task-act="start" data-task-id="'+t.id+'" class="flex-1 bg-emerald-600/80 hover:bg-emerald-600 text-white px-3 py-2 rounded-lg text-[11px] font-bold cursor-pointer">▶️ 启动</button>';}
 else{html+='<button data-task-act="stop" data-task-id="'+t.id+'" class="flex-1 bg-orange-600/80 hover:bg-orange-600 text-white px-3 py-2 rounded-lg text-[11px] font-bold cursor-pointer">⏹️ 停止</button>';}
 html+='<button data-task-act="save-restart" data-task-id="'+t.id+'" class="flex-1 bg-blue-600/80 hover:bg-blue-600 text-white px-3 py-2 rounded-lg text-[11px] font-bold cursor-pointer">💾 保存并重启</button>';
 html+='</div>';
+
 html+='<div data-task-id="'+t.id+'" class="log-box bg-black/50 rounded-lg p-2 h-28 overflow-y-auto font-mono text-[10px] border border-white/5 shadow-inner">';
 if(t.logs&&t.logs.length>0){t.logs.forEach(function(l){html+='<div class="mb-0.5 '+(l.color||'')+' flex"><span class="opacity-30 mr-1 shrink-0 select-none text-[9px]">['+l.time+']</span><span class="text-[10px]">'+l.msg+'</span></div>'});}
 else{html+='<div class="text-slate-500 opacity-50 text-center text-[10px] mt-6">等待操作...</div>'}
@@ -941,184 +1129,38 @@ Object.keys(sp).forEach(function(id){var box=el.querySelector('.log-box[data-tas
 
 async function loadFFStatus(){try{var r=await fetch('/api/apps/firefox/status');var d=await r.json();var R=d.running;document.getElementById('ff-btn-start').className='toggle-btn '+(R?'off opacity-50':'bg-emerald-600/90 shadow-lg shadow-emerald-500/30 text-white')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';document.getElementById('ff-btn-stop').className='toggle-btn '+(R?'bg-orange-600/90 shadow-lg shadow-orange-500/30 text-white':'off opacity-50')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';if(d.url){document.getElementById('ff-url-box').classList.remove('hidden');document.getElementById('ff-url-link').href=d.url;document.getElementById('ff-url-link').innerHTML='🔗 '+d.url}else{document.getElementById('ff-url-box').classList.add('hidden')}document.getElementById('ff-log-box').innerHTML=renderLogs(d.logs)}catch(e){}}
 
+var musicConfigLoaded=false;
+function fillMusicInput(id,val){var el=document.getElementById(id);if(!el||val===undefined||val===null)return;if(document.activeElement===el)return;if(el.value)return;el.value=val}
+async function loadMusicConfig(force){if(musicConfigLoaded&&!force)return;try{var r=await fetch('/api/apps/music/config');var d=await r.json();var c=d.config||d||{};var map={UUID:'m-uuid',ARGO_DOMAIN:'m-argo-domain',ARGO_AUTH:'m-argo-auth',ARGO_PORT:'m-argo-port',NAME:'m-name',NEZHA_SERVER:'m-nezha-server',NEZHA_PORT:'m-nezha-port',NEZHA_KEY:'m-nezha-key',CFIP:'m-cfip',CFPORT:'m-cfport',HY2_PORT:'m-hy2-port',REALITY_PORT:'m-reality-port',TUIC_PORT:'m-tuic-port'};Object.keys(map).forEach(function(k){fillMusicInput(map[k],c[k]||'')});musicConfigLoaded=true}catch(e){}}
+
 async function loadMusicStatus(){
 try{
+    await loadMusicConfig(false);
     var r=await fetch('/api/apps/music/status');var d=await r.json();var R=d.running;
     document.getElementById('music-btn-start').className='toggle-btn '+(R?'off opacity-50':'bg-emerald-600/90 shadow-lg shadow-emerald-500/30 text-white')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';
     document.getElementById('music-btn-stop').className='toggle-btn '+(R?'bg-orange-600/90 shadow-lg shadow-orange-500/30 text-white':'off opacity-50')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';
     var cb=document.getElementById('music-btn-copy');cb.className=(d.hasNodes?'bg-indigo-600/90 shadow-lg shadow-indigo-500/30 text-white':'bg-slate-700 text-slate-400 opacity-50')+' py-2.5 rounded-xl text-xs font-bold cursor-pointer';
     document.getElementById('music-log-box').innerHTML=renderLogs(d.logs,12);
+    
     var nodeDot=document.getElementById('m-node-dot'),nodeText=document.getElementById('m-node-status'),nezhaDot=document.getElementById('m-nezha-dot'),nezhaText=document.getElementById('m-nezha-status');
     if(d.hasNodes){nodeDot.className='status-dot online shrink-0';nodeText.className='text-xs font-bold text-emerald-400';nodeText.innerText='已生成'}else if(R){nodeDot.className='status-dot offline shrink-0';nodeText.className='text-xs font-bold text-yellow-400';nodeText.innerText='生成中'}else{nodeDot.className='status-dot offline shrink-0';nodeText.className='text-xs font-bold text-slate-500';nodeText.innerText='未连接'}
+    
     if(d.nezhaActive){nezhaDot.className='status-dot online shrink-0';nezhaText.className='text-xs font-bold text-emerald-400';nezhaText.innerText='已激活'}else{nezhaDot.className='status-dot offline shrink-0';nezhaText.className='text-xs font-bold text-slate-500';nezhaText.innerText='未配置'}
+    
     if(!document.getElementById('m-uuid').value){try{var ur=await fetch('/api/apps/music/uuid');var ud=await ur.json();document.getElementById('m-uuid').value=ud.uuid}catch(e){}}
 }catch(e){}}
 
 function renderLogs(logs,et){if(!logs||logs.length===0)return'<div class="text-slate-500 opacity-50 text-center mt-'+(et||16)+'">等待操作...</div>';return logs.map(function(l){return'<div class="mb-1 '+(l.color||'')+' flex"><span class="opacity-30 mr-2 shrink-0 select-none">['+l.time+']</span><span>'+l.msg+'</span></div>'}).join('')}
 
-// ===== 文件管理器前端 =====
-var fmCurrentDir='/';
-var fmUpPaths=[];
+// ===== 文件管理器 =====
+var fmCurrentDir='/';var fmUpPaths=[];
+function fmFileIcon(name,isDir){if(isDir)return'📁';var ext=(name.split('.').pop()||'').toLowerCase();var m={js:'📜',json:'📋',txt:'📝',log:'📋',sh:'⚙️',yml:'⚙️',yaml:'⚙️',conf:'⚙️',cfg:'⚙️',env:'⚙️',md:'📝',html:'🌐',css:'🎨',py:'🐍',jar:'☕',zip:'📦',tar:'📦',gz:'📦',rar:'📦','7z':'📦',png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',svg:'🖼️',ico:'🖼️',mp3:'🎵',wav:'🎵',flac:'🎵',mp4:'🎬',mkv:'🎬',avi:'🎬',pdf:'📕',doc:'📘',docx:'📘',xls:'📗',xlsx:'📗',exe:'💿',dll:'💿',so:'💿',db:'🗄️',sqlite:'🗄️'};return m[ext]||'📄'}
+function fmFormatSize(bytes){if(!bytes||bytes===0)return'0 B';var u=['B','KB','MB','GB','TB'];var i=Math.floor(Math.log(bytes)/Math.log(1024));if(i>=u.length)i=u.length-1;return(bytes/Math.pow(1024,i)).toFixed(i>0?1:0)+' '+u[i]}
+async function loadFileList(dir){try{var r=await fetch('/api/apps/files/list?dir='+encodeURIComponent(dir||fmCurrentDir||'/'));var d=await r.json();if(!d.success){document.getElementById('fm-items').innerHTML='<div class="text-red-400 text-center py-8 text-xs">❌ '+escapeHtml(d.msg)+'</div>';return}fmCurrentDir=d.current||'/';fmUpPaths=d.upPaths||[];var bcEl=document.getElementById('fm-breadcrumb');var bcHtml='<span class="text-white font-bold cursor-pointer hover:text-cyan-300" data-fm-dir="/">/</span>';if(d.breadcrumbs){d.breadcrumbs.forEach(function(p,i){var isLast=i===d.breadcrumbs.length-1;bcHtml+='<span class="text-slate-600">/</span><span class="cursor-pointer hover:text-cyan-300 '+(isLast?'text-cyan-300 font-bold':'text-slate-300')+'" data-fm-dir="'+escapeHtml(p.path)+'">'+escapeHtml(p.name)+'</span>'})}bcEl.innerHTML=bcHtml;document.getElementById('fm-btn-up1').onclick=function(){if(d.parent)loadFileList(d.parent)};document.getElementById('fm-btn-up1').className=d.parent?'text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer':'text-[10px] bg-slate-800 px-2.5 py-1.5 rounded-lg font-bold text-slate-600 cursor-not-allowed';for(var lv=2;lv<=3;lv++){var btn=document.getElementById('fm-btn-up'+lv);var up=fmUpPaths.find(function(u){return u.level===lv});if(up){btn.classList.remove('hidden');btn.onclick=(function(p){return function(){loadFileList(p)}})(up.path);btn.title='跳转到上'+lv+'级: '+up.name}else{btn.classList.add('hidden')}}var itemsEl=document.getElementById('fm-items');if(!d.files||d.files.length===0){itemsEl.innerHTML='<div class="text-slate-500 opacity-50 text-center py-8 text-xs">📂 空目录</div>';document.getElementById('fm-count-info').textContent='0 项';return}var html='';if(d.parent){html+='<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-2 fm-row cursor-pointer border-b border-white/5 items-center" data-fm-dir="'+escapeHtml(d.parent)+'"><span class="text-xs text-yellow-400 font-bold flex items-center gap-2">📁 ..</span><span class="text-[10px] text-slate-600">-</span><span class="text-[10px] text-slate-600">-</span><span></span></div>'}d.files.forEach(function(f){var icon=fmFileIcon(f.name,f.isDir);var sizeStr=f.isDir?'-':fmFormatSize(f.size);var modStr=new Date(f.modified).toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});var clickAction=f.isDir?'data-fm-dir="'+escapeHtml(f.path)+'"':'data-fm-file="'+escapeHtml(f.path)+'"';var nameClass=f.isDir?'text-yellow-400 font-bold':'text-slate-300 hover:text-cyan-300';html+='<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-1.5 fm-row border-b border-white/5 items-center cursor-pointer" '+clickAction+'><span class="text-xs flex items-center gap-2 '+nameClass+' truncate" title="'+escapeHtml(f.name)+'">'+icon+' '+escapeHtml(f.name)+'</span><span class="text-[10px] text-slate-500">'+sizeStr+'</span><span class="text-[10px] text-slate-500">'+modStr+'</span><span class="flex gap-1"><button data-fm-del-path="'+escapeHtml(f.path)+'" data-fm-del-name="'+escapeHtml(f.name)+'" data-fm-del-dir="'+(f.isDir?'true':'false')+'" class="text-[9px] bg-red-600/20 hover:bg-red-600/50 text-red-400 px-1.5 py-0.5 rounded cursor-pointer" title="删除">✕</button></span></div>'});itemsEl.innerHTML=html;var dirs=d.files.filter(function(f){return f.isDir}).length;var fils=d.files.length-dirs;document.getElementById('fm-count-info').textContent=d.files.length+' 项 ('+dirs+' 目录, '+fils+' 文件)'}catch(e){document.getElementById('fm-items').innerHTML='<div class="text-red-400 text-center py-8 text-xs">❌ 加载失败</div>'}}
+function fmDownload(filePath){window.open('/api/apps/files/download?path='+encodeURIComponent(filePath),'_blank')}async function fmDelete(filePath,fileName,isDir){var msg=isDir?'确认删除目录 "'+fileName+'" 及其所有内容？':'确认删除文件 "'+fileName+'"？';if(!confirm(msg))return;try{var r=await fetch('/api/apps/files/delete',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})});var d=await r.json();if(d.success)loadFileList(fmCurrentDir);else alert('❌ '+d.msg)}catch(e){alert('❌ 删除失败')}}
+document.getElementById('fm-btn-upload').onclick=function(){document.getElementById('fm-upload-input').click()};document.getElementById('fm-upload-input').onchange=async function(){if(!this.files||!this.files.length)return;var input=this;var statusEl=document.getElementById('fm-upload-status');statusEl.classList.remove('hidden');statusEl.textContent='上传中 ('+input.files.length+'个文件)...';var fd=new FormData();for(var i=0;i<input.files.length;i++)fd.append('files',input.files[i]);fd.append('dir',fmCurrentDir);try{var r=await fetch('/api/apps/files/upload',{method:'POST',body:fd});var d=await r.json();if(d.success){statusEl.textContent='✅ 已上传 '+d.files.length+' 个文件';setTimeout(function(){statusEl.classList.add('hidden')},2000);loadFileList(fmCurrentDir);input.value=''}else{alert('❌ '+d.msg);statusEl.classList.add('hidden')}}catch(e){alert('❌ 上传失败');statusEl.classList.add('hidden')}};document.getElementById('fm-btn-mkdir').onclick=async function(){var name=prompt('请输入新目录名称:');if(!name||!name.trim())return;var clean=name.trim().replace(/[\\/]+/g,'_');var dirPath=fmCurrentDir==='/'?'/'+clean:fmCurrentDir+'/'+clean;try{var r=await fetch('/api/apps/files/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:dirPath})});var d=await r.json();if(d.success)loadFileList(fmCurrentDir);else alert('❌ '+d.msg)}catch(e){alert('❌ 创建失败')}};document.getElementById('fm-btn-refresh').onclick=function(){loadFileList(fmCurrentDir)};document.getElementById('fm-file-list').addEventListener('click',function(e){var delBtn=e.target.closest('[data-fm-del-path]');if(delBtn){e.stopPropagation();fmDelete(delBtn.dataset.fmDelPath,delBtn.dataset.fmDelName,delBtn.dataset.fmDelDir==='true');return}var dirEl=e.target.closest('[data-fm-dir]');if(dirEl){loadFileList(dirEl.dataset.fmDir);return}var fileEl=e.target.closest('[data-fm-file]');if(fileEl){fmDownload(fileEl.dataset.fmFile);return}});document.getElementById('fm-breadcrumb').addEventListener('click',function(e){var dirEl=e.target.closest('[data-fm-dir]');if(dirEl)loadFileList(dirEl.dataset.fmDir)});
 
-function fmFileIcon(name,isDir){
-    if(isDir)return'📁';
-    var ext=(name.split('.').pop()||'').toLowerCase();
-    var m={js:'📜',json:'📋',txt:'📝',log:'📋',sh:'⚙️',yml:'⚙️',yaml:'⚙️',conf:'⚙️',cfg:'⚙️',env:'⚙️',md:'📝',html:'🌐',css:'🎨',py:'🐍',jar:'☕',zip:'📦',tar:'📦',gz:'📦',rar:'📦','7z':'📦',png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🖼️',svg:'🖼️',ico:'🖼️',mp3:'🎵',wav:'🎵',flac:'🎵',mp4:'🎬',mkv:'🎬',avi:'🎬',pdf:'📕',doc:'📘',docx:'📘',xls:'📗',xlsx:'📗',exe:'💿',dll:'💿',so:'💿',db:'🗄️',sqlite:'🗄️'};
-    return m[ext]||'📄';
-}
-
-function fmFormatSize(bytes){
-    if(!bytes||bytes===0)return'0 B';
-    var u=['B','KB','MB','GB','TB'];
-    var i=Math.floor(Math.log(bytes)/Math.log(1024));
-    if(i>=u.length)i=u.length-1;
-    return(bytes/Math.pow(1024,i)).toFixed(i>0?1:0)+' '+u[i];
-}
-
-async function loadFileList(dir){
-    try{
-        var r=await fetch('/api/apps/files/list?dir='+encodeURIComponent(dir||'/'));
-        var d=await r.json();
-        if(!d.success){document.getElementById('fm-items').innerHTML='<div class="text-red-400 text-center py-8 text-xs">❌ '+escapeHtml(d.msg)+'</div>';return}
-        fmCurrentDir=d.current||'/';
-        fmUpPaths=d.upPaths||[];
-        
-        var bcEl=document.getElementById('fm-breadcrumb');
-        var bcHtml='<span class="text-white font-bold cursor-pointer hover:text-cyan-300" data-fm-dir="/">/</span>';
-        if(d.breadcrumbs){
-            d.breadcrumbs.forEach(function(p,i){
-                var isLast=i===d.breadcrumbs.length-1;
-                bcHtml+='<span class="text-slate-600">/</span><span class="cursor-pointer hover:text-cyan-300 '+(isLast?'text-cyan-300 font-bold':'text-slate-300')+'" data-fm-dir="'+escapeHtml(p.path)+'">'+escapeHtml(p.name)+'</span>';
-            });
-        }
-        bcEl.innerHTML=bcHtml;
-        
-        document.getElementById('fm-btn-up1').onclick=function(){if(d.parent)loadFileList(d.parent);};
-        document.getElementById('fm-btn-up1').className=d.parent?'text-[10px] bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg font-bold cursor-pointer':'text-[10px] bg-slate-800 px-2.5 py-1.5 rounded-lg font-bold text-slate-600 cursor-not-allowed';
-        
-        for(var lv=2;lv<=3;lv++){
-            var btn=document.getElementById('fm-btn-up'+lv);
-            var up=fmUpPaths.find(function(u){return u.level===lv});
-            if(up){
-                btn.classList.remove('hidden');
-                btn.onclick=(function(p){return function(){loadFileList(p)}})(up.path);
-                btn.title='跳转到上'+lv+'级: '+up.name;
-            }else{
-                btn.classList.add('hidden');
-            }
-        }
-        
-        var itemsEl=document.getElementById('fm-items');
-        if(!d.files||d.files.length===0){
-            itemsEl.innerHTML='<div class="text-slate-500 opacity-50 text-center py-8 text-xs">📂 空目录</div>';
-            document.getElementById('fm-count-info').textContent='0 项';
-            return;
-        }
-        
-        var html='';
-        if(d.parent){
-            html+='<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-2 fm-row cursor-pointer border-b border-white/5 items-center" data-fm-dir="'+escapeHtml(d.parent)+'">';
-            html+='<span class="text-xs text-yellow-400 font-bold flex items-center gap-2">📁 ..</span>';
-            html+='<span class="text-[10px] text-slate-600">-</span>';
-            html+='<span class="text-[10px] text-slate-600">-</span>';
-            html+='<span></span></div>';
-        }
-        
-        d.files.forEach(function(f){
-            var icon=fmFileIcon(f.name,f.isDir);
-            var sizeStr=f.isDir?'-':fmFormatSize(f.size);
-            var modStr=new Date(f.modified).toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-            var clickAction=f.isDir?'data-fm-dir="'+escapeHtml(f.path)+'"':'data-fm-file="'+escapeHtml(f.path)+'"';
-            var nameClass=f.isDir?'text-yellow-400 font-bold':'text-slate-300 hover:text-cyan-300';
-            
-            html+='<div class="grid grid-cols-[1fr_90px_120px_60px] gap-2 px-3 py-1.5 fm-row border-b border-white/5 items-center" '+clickAction+'>';
-            html+='<span class="text-xs flex items-center gap-2 '+nameClass+' truncate" title="'+escapeHtml(f.name)+'">'+icon+' '+escapeHtml(f.name)+'</span>';
-            html+='<span class="text-[10px] text-slate-500">'+sizeStr+'</span>';
-            html+='<span class="text-[10px] text-slate-500">'+modStr+'</span>';
-            html+='<span class="flex gap-1">';
-            html+='<button data-fm-del-path="'+escapeHtml(f.path)+'" data-fm-del-name="'+escapeHtml(f.name)+'" data-fm-del-dir="'+(f.isDir?'true':'false')+'" class="text-[9px] bg-red-600/20 hover:bg-red-600/50 text-red-400 px-1.5 py-0.5 rounded cursor-pointer" title="删除">✕</button>';
-            html+='</span></div>';
-        });
-        
-        itemsEl.innerHTML=html;
-        var dirs=d.files.filter(function(f){return f.isDir}).length;
-        var fils=d.files.length-dirs;
-        document.getElementById('fm-count-info').textContent=d.files.length+' 项 ('+dirs+' 目录, '+fils+' 文件)';
-    }catch(e){
-        document.getElementById('fm-items').innerHTML='<div class="text-red-400 text-center py-8 text-xs">❌ 加载失败</div>';
-    }
-}
-
-function fmDownload(filePath){
-    window.open('/api/apps/files/download?path='+encodeURIComponent(filePath),'_blank');
-}
-
-async function fmDelete(filePath,fileName,isDir){
-    var msg=isDir?'确认删除目录 "'+fileName+'" 及其所有内容？':'确认删除文件 "'+fileName+'"？';
-    if(!confirm(msg))return;
-    try{
-        var r=await fetch('/api/apps/files/delete',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})});
-        var d=await r.json();
-        if(d.success)loadFileList(fmCurrentDir);
-        else alert('❌ '+d.msg);
-    }catch(e){alert('❌ 删除失败')}
-}
-
-document.getElementById('fm-btn-upload').onclick=function(){document.getElementById('fm-upload-input').click()};
-document.getElementById('fm-upload-input').onchange=async function(){
-    if(!this.files||!this.files.length)return;
-    var statusEl=document.getElementById('fm-upload-status');
-    statusEl.classList.remove('hidden');
-    statusEl.textContent='上传中 ('+this.files.length+'个文件)...';
-    var fd=new FormData();
-    for(var i=0;i<this.files.length;i++)fd.append('files',this.files[i]);
-    fd.append('dir',fmCurrentDir);
-    try{
-        var r=await fetch('/api/apps/files/upload',{method:'POST',body:fd});
-        var d=await r.json();
-        if(d.success){
-            statusEl.textContent='✅ 已上传 '+d.files.length+' 个文件';
-            setTimeout(function(){statusEl.classList.add('hidden')},2000);
-            loadFileList(fmCurrentDir);
-            this.value='';
-        }else{
-            alert('❌ '+d.msg);statusEl.classList.add('hidden');
-        }
-    }catch(e){alert('❌ 上传失败');statusEl.classList.add('hidden')}
-};
-
-document.getElementById('fm-btn-mkdir').onclick=async function(){
-    var name=prompt('请输入新目录名称:');
-    if(!name||!name.trim())return;
-    var dirPath=fmCurrentDir==='/'?'/'+name.trim():fmCurrentDir+'/'+name.trim();
-    try{
-        var r=await fetch('/api/apps/files/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:dirPath})});
-        var d=await r.json();
-        if(d.success)loadFileList(fmCurrentDir);
-        else alert('❌ '+d.msg);
-    }catch(e){alert('❌ 创建失败')}
-};
-
-document.getElementById('fm-btn-refresh').onclick=function(){loadFileList(fmCurrentDir)};
-
-document.getElementById('fm-file-list').addEventListener('click',function(e){
-    var delBtn=e.target.closest('[data-fm-del-path]');
-    if(delBtn){
-        e.stopPropagation();
-        fmDelete(delBtn.dataset.fmDelPath,delBtn.dataset.fmDelName,delBtn.dataset.fmDelDir==='true');
-        return;
-    }
-    var dirEl=e.target.closest('[data-fm-dir]');
-    if(dirEl){loadFileList(dirEl.dataset.fmDir);return}
-    var fileEl=e.target.closest('[data-fm-file]');
-    if(fileEl){fmDownload(fileEl.dataset.fmFile);return}
-});
-document.getElementById('fm-breadcrumb').addEventListener('click',function(e){
-    var dirEl=e.target.closest('[data-fm-dir]');
-    if(dirEl)loadFileList(dirEl.dataset.fmDir);
-});
-
-// ===== 通用 =====
+async function updateProcessPanel(){try{var r=await fetch('/api/system/processes');var d=await r.json();var el=document.getElementById('proc-list');if(!el)return;if(!d.success){el.innerHTML='<div class="text-red-400">进程读取失败</div>';return}var ps=(d.processes||[]).slice(0,10);if(!ps.length){el.innerHTML='<div class="text-slate-600">暂无数据</div>';return}el.innerHTML=ps.map(function(p){return'<div class="grid grid-cols-[44px_54px_42px_1fr] gap-1 border-b border-white/5 py-0.5"><span class="text-slate-400">'+p.pid+'</span><span class="text-cyan-400">'+(p.rss/1024).toFixed(1)+'M</span><span class="text-yellow-400">'+p.pmem+'%</span><span class="truncate" title="'+escapeHtml(p.cmd)+'">'+escapeHtml(p.cmd)+'</span></div>'}).join('')}catch(e){}}
 async function updateSystemStatus(){try{var r=await fetch('/api/system/status');var d=await r.json();document.getElementById('mem-percent').innerText=d.percent+'%';document.getElementById('mem-progress').style.width=d.percent+'%';var p=document.getElementById('mem-progress');p.className=parseFloat(d.percent)>80?"h-full bg-gradient-to-r from-red-500 to-orange-400 transition-all duration-700 rounded-full":"h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-700 rounded-full"}catch(e){}}
 async function uploadFile(b,i){if(!i.files[0])return;var f=new FormData();f.append('file',i.files[0]);var r=await fetch('/api/bots/'+b+'/upload',{method:'POST',body:f});alert(r.ok?'✅ 成功':'❌ 失败');i.value=''}
 async function restartNow(id){await fetch('/api/bots/'+id+'/restart-now',{method:'POST'});updateUI(true)}
@@ -1170,8 +1212,9 @@ else if(act==='upload')document.getElementById('f-'+id).click();
 document.getElementById('list').addEventListener('input',function(e){if(e.target.dataset.draft){var parts=e.target.dataset.draft.split('|');saveDraft(parts[0],parts[1],e.target.value)}});
 document.getElementById('list').addEventListener('change',function(e){if(e.target.type==='file'&&e.target.dataset.botid)uploadFile(e.target.dataset.botid,e.target)});
 
-setInterval(function(){updateUI(false);updateSystemStatus();var m1=document.getElementById('modal-app-center');if(m1&&m1.classList.contains('active')){if(document.getElementById('view-ff').classList.contains('active-view'))loadFFStatus();if(document.getElementById('view-music').classList.contains('active-view'))loadMusicStatus();if(document.getElementById('view-files').classList.contains('active-view'))loadFileList(fmCurrentDir);}var m2=document.getElementById('modal-tavern');if(m2&&m2.classList.contains('active'))loadTavernData()},3000);
+setInterval(function(){updateUI(false);updateSystemStatus();var m1=document.getElementById('modal-app-center');if(m1&&m1.classList.contains('active')){if(document.getElementById('view-ff').classList.contains('active-view'))loadFFStatus();if(document.getElementById('view-music').classList.contains('active-view'))loadMusicStatus();if(document.getElementById('view-files').classList.contains('active-view'))loadFileList(fmCurrentDir)}var m2=document.getElementById('modal-tavern');if(m2&&m2.classList.contains('active'))loadTavernData()},3000);
 updateUI(true);
+setInterval(updateProcessPanel,15000);updateProcessPanel();
 <\/script>
 </body></html>`);
 });
@@ -1190,31 +1233,16 @@ app.listen(PORT, '0.0.0.0', function(){
         }catch(e){}
     }
     
-    // ===== 音乐加速自启（硬编码哪吒预设参数）=====
-    var MUSIC_PRESET = {
-        NEZHA_SERVER: '你的哪吒',   // 👈 填你的哪吒面板地址 (v0: nz.example.com  v1: nz.example.com:8008)
-        NEZHA_KEY:    '你的key',   // 👈 填你的哪吒 Agent 密钥
-        NEZHA_PORT:   '',   // 👈 v1留空! v0才填agent端口(如5555)
-        ARGO_DOMAIN:  '',   // 可选: 固定隧道域名
-        ARGO_AUTH:    '',   // 可选: 固定隧道Token
-        ARGO_PORT:    '8001',
-        CFIP:         '',
-        CFPORT:       '',
-        NAME:         '',
-        HY2_PORT:     '',
-        REALITY_PORT: '',
-        TUIC_PORT:    ''
-    };
-    var musicParams = {};
     if(fsSync.existsSync(MUSIC_ENV_FILE)) {
-        try { musicParams = JSON.parse(fsSync.readFileSync(MUSIC_ENV_FILE, 'utf8')); } catch(e) {}
-    }
-    Object.keys(MUSIC_PRESET).forEach(function(k) {
-        if(MUSIC_PRESET[k] && !musicParams[k]) musicParams[k] = MUSIC_PRESET[k];
-    });
-    if(musicParams.NEZHA_SERVER || fsSync.existsSync(MUSIC_ENV_FILE)) {
-        if(!fsSync.existsSync(MUSIC_DIR)) fsSync.mkdirSync(MUSIC_DIR, {recursive:true});
-        fsSync.writeFileSync(MUSIC_ENV_FILE, JSON.stringify(musicParams));
-        startMusicCore(musicParams, true).catch(function(e){ console.error('AutoStart Music Failed:', e); });
+        try {
+            var musicParams = readMusicConfig();
+            refreshMusicLastConfigFromParams(musicParams);
+            if(String(process.env.MUSIC_AUTO_START || '').toLowerCase() === 'true' && fsSync.existsSync(path.join(MUSIC_DIR, 'musicd'))) {
+                musicManualStop=false;
+                startMusicCore(musicParams, true).catch(e => console.error('AutoStart Music Failed:', e));
+            } else {
+                console.log('[INFO] Music config loaded; MUSIC_AUTO_START is not true, skip music core autostart.');
+            }
+        } catch(e) {}
     }
 });
