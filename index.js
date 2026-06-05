@@ -596,33 +596,6 @@ function refreshMusicLastConfigFromParams(params){params=params||{};musicLastCon
 function musicMaybeDecodeNodes(content){content=String(content||'').trim();if(!content)return'';if(/(vless|vmess|trojan):\/\//.test(content))return content;try{var decoded=Buffer.from(content,'base64').toString('utf8');if(/(vless|vmess|trojan):\/\//.test(decoded))return decoded}catch(e){}return content}
 function musicMaybeEncodeLikeOriginal(original, plain){original=String(original||'').trim();if(!original)return plain;return /(vless|vmess|trojan):\/\//.test(original)?plain:Buffer.from(plain).toString('base64')}
 async function getMusicNodeName(){try{var r=await axios.get('https://ipapi.co/json/',{timeout:3000});if(r.data&&r.data.country_code&&r.data.org)return r.data.country_code+'_'+r.data.org}catch(e){}try{var r2=await axios.get('http://ip-api.com/json/',{timeout:3000});if(r2.data&&r2.data.status==='success'&&r2.data.countryCode&&r2.data.org)return r2.data.countryCode+'_'+r2.data.org}catch(e2){}return'Unknown'}
-async function ensureThreeMusicNodes(content){
-    var plain=musicMaybeDecodeNodes(content);
-    var cfg=getOrCreateMusicConfig();
-    var lines=plain.split(/\r?\n/).map(function(s){return s.trim()}).filter(function(s){return /(vless|vmess|trojan):\/\//.test(s)});
-    var hasVless=lines.some(function(s){return s.indexOf('vless://')===0});
-    var hasVmess=lines.some(function(s){return s.indexOf('vmess://')===0});
-    var hasTrojan=lines.some(function(s){return s.indexOf('trojan://')===0});
-    if(hasVless&&hasVmess&&hasTrojan)return content;
-    var argoDomain=(cfg.ARGO_DOMAIN||'').replace(/^https?:\/\//,'').replace(/\/+$/,'');
-    if(!argoDomain){var m=plain.match(/host=([^&#\s]+)/)||plain.match(/sni=([^&#\s]+)/);if(m)argoDomain=decodeURIComponent(m[1])}
-    if(!argoDomain)return content;
-    var uuid=cfg.UUID||ensureMusicUUID(cfg);
-    var cfip=cfg.CFIP||'www.visa.com.tw';
-    var cfport=cfg.CFPORT||'443';
-    var isp=await getMusicNodeName();
-    var nodeName=(cfg.NAME?(cfg.NAME+'-'):'')+isp;
-    var encodedName=encodeURIComponent(nodeName);
-    var newLines=[];
-    if(hasVless)newLines.push(lines.find(function(s){return s.indexOf('vless://')===0}));else newLines.push('vless://'+uuid+'@'+cfip+':'+cfport+'?encryption=none&security=tls&sni='+encodeURIComponent(argoDomain)+'&fp=firefox&type=ws&host='+encodeURIComponent(argoDomain)+'&path=%2Fvless-argo%3Fed%3D2560#'+encodedName);
-    if(hasVmess)newLines.push(lines.find(function(s){return s.indexOf('vmess://')===0}));else{var vm={v:'2',ps:nodeName,add:cfip,port:String(cfport),id:uuid,aid:'0',scy:'none',net:'ws',type:'none',host:argoDomain,path:'/vmess-argo?ed=2560',tls:'tls',sni:argoDomain,alpn:'',fp:'firefox'};newLines.push('vmess://'+Buffer.from(JSON.stringify(vm)).toString('base64'))}
-    if(hasTrojan)newLines.push(lines.find(function(s){return s.indexOf('trojan://')===0}));else newLines.push('trojan://'+uuid+'@'+cfip+':'+cfport+'?security=tls&sni='+encodeURIComponent(argoDomain)+'&fp=firefox&type=ws&host='+encodeURIComponent(argoDomain)+'&path=%2Ftrojan-argo%3Fed%3D2560#'+encodedName);
-    lines.forEach(function(s){if(newLines.indexOf(s)<0)newLines.push(s)});
-    var merged=newLines.join('\n');
-    var out=musicMaybeEncodeLikeOriginal(content,merged);
-    try{if(!fsSync.existsSync(path.dirname(SUB_FILE)))fsSync.mkdirSync(path.dirname(SUB_FILE),{recursive:true});fsSync.writeFileSync(SUB_FILE,out)}catch(e){}
-    return out;
-}
 async function getMusicCoreProcesses(){return await listManagedProcesses(MUSIC_DIR,/musicd|sbx|sing-box|music_cache/i)}
 async function isMusicCoreRunning(){if(musicProcess&&!musicProcess.killed)return true;var ps=await getMusicCoreProcesses();return ps.length>0}
 function clearMusicRestartTimer(){if(musicRestartTimer){clearTimeout(musicRestartTimer);musicRestartTimer=null}}
@@ -662,7 +635,7 @@ app.get("/api/apps/music/nodes",function(req,res){
     try{
         if(!fsSync.existsSync(SUB_FILE))return res.json({success:false,nodes:''});
         var content=fsSync.readFileSync(SUB_FILE,'utf8').trim();
-        ensureThreeMusicNodes(content).then(function(nodes){res.json({success:true,nodes:nodes})}).catch(function(){res.json({success:true,nodes:content})})
+        res.json({success:true,nodes:content})
     }catch(e){res.json({success:false,nodes:''})}
 });
 
